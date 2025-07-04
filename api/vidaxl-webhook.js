@@ -34,7 +34,7 @@ async function sendErrorEmail(order, error) {
       },
       body: JSON.stringify({
         from: 'BoligRetning <onboarding@resend.dev>',
-        to: 'info@boligretning.dk',
+        to: 'kontakt@boligretning.dk',
         subject: `VidaXL Ordre Fejl - ${order.name}`,
         html: `
           <h2>Ordre kunne ikke sendes til VidaXL</h2>
