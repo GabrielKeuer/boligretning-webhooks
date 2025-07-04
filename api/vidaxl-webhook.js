@@ -22,6 +22,65 @@ function verifyWebhook(rawBody, signature) {
   return hash === signature;
 }
 
+async function sendErrorEmail(order, error) {
+  console.log('📧 Sender fejl email...');
+  
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'BoligRetning <onboarding@resend.dev>',
+        to: 'info@boligretning.dk',
+        subject: `VidaXL Ordre Fejl - ${order.name}`,
+        html: `
+          <h2>Ordre kunne ikke sendes til VidaXL</h2>
+          <p><strong>Ordre:</strong> ${order.name}</p>
+          <p><strong>Kunde:</strong> ${order.email}</p>
+          <p><strong>Telefon:</strong> ${order.phone || order.billing_address?.phone || 'Ikke angivet'}</p>
+          
+          <h3>Produkter:</h3>
+          <ul>
+            ${order.line_items.map(item => `
+              <li>${item.quantity}x ${item.sku || 'INGEN SKU'} - ${item.name}</li>
+            `).join('')}
+          </ul>
+          
+          <h3>Leveringsadresse:</h3>
+          <p>
+            ${order.shipping_address.name}<br>
+            ${order.shipping_address.address1}<br>
+            ${order.shipping_address.address2 ? order.shipping_address.address2 + '<br>' : ''}
+            ${order.shipping_address.zip} ${order.shipping_address.city}<br>
+            ${order.shipping_address.country}
+          </p>
+          
+          <h3>Fejl detaljer:</h3>
+          <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
+${JSON.stringify(error, null, 2)}
+          </pre>
+          
+          <p><a href="https://admin.shopify.com/store/boligretning/orders/${order.id}" 
+                style="background: #5c6ac4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
+                Se ordre i Shopify
+             </a></p>
+        `
+      })
+    });
+    
+    if (!response.ok) {
+      console.error('Email send fejlede:', await response.text());
+    } else {
+      console.log('✅ Fejl email sendt til info@boligretning.dk');
+    }
+  } catch (e) {
+    console.error('Email error:', e);
+  }
+}
+
 async function sendToVidaXL(order) {
   console.log('📤 Sender til VidaXL...');
   
@@ -86,13 +145,13 @@ export default async function handler(req, res) {
     
     const order = JSON.parse(rawBody.toString());
     
-    // SVAR SHOPIFY MED DET SAMME - SUPER VIGTIGT!
+    // SVAR SHOPIFY MED DET SAMME!
     res.status(200).json({ 
       success: true,
       message: 'Webhook modtaget'
     });
     
-    // Nu kan vi process order EFTER Shopify har fået svar
+    // Process order efter Shopify har fået svar
     console.log('📦 Processing ordre:', {
       name: order.name,
       email: order.email,
@@ -110,12 +169,17 @@ export default async function handler(req, res) {
       
     } catch (vidaxlError) {
       console.error('❌ VidaXL fejl:', vidaxlError.message);
-      // TODO: Send error email med Resend
+      
+      // Send fejl email
+      await sendErrorEmail(order, {
+        error: vidaxlError.message,
+        timestamp: new Date().toISOString(),
+        order_reference: order.name
+      });
     }
     
   } catch (error) {
     console.error('❌ Webhook fejl:', error);
-    // Hvis fejl sker FØR vi svarer Shopify, så svar med error
     if (!res.headersSent) {
       res.status(500).json({ error: error.message });
     }
