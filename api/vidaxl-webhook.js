@@ -22,6 +22,41 @@ function verifyWebhook(rawBody, signature) {
   return hash === signature;
 }
 
+async function sendErrorEmail(order, error) {
+  console.log('📧 Sender fejl email...');
+  
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'BoligRetning <onboarding@resend.dev>',
+        to: 'info@boligretning.dk',
+        subject: `VidaXL Ordre Fejl - ${order.name}`,
+        html: `
+          <h2>Ordre kunne ikke sendes til VidaXL</h2>
+          <p><strong>Ordre:</strong> ${order.name}</p>
+          <p><strong>Kunde:</strong> ${order.email}</p>
+          <p><strong>Fejl:</strong></p>
+          <pre style="background: #f5f5f5; padding: 10px;">${JSON.stringify(error, null, 2)}</pre>
+          <p><a href="https://admin.shopify.com/store/boligretning/orders/${order.id}">Se ordre i Shopify</a></p>
+        `
+      })
+    });
+    
+    if (!response.ok) {
+      console.error('Email fejlede:', await response.text());
+    } else {
+      console.log('✅ Fejl email sendt');
+    }
+  } catch (e) {
+    console.error('Email error:', e);
+  }
+}
+
 async function sendToVidaXL(order) {
   console.log('📤 Sender til VidaXL...');
   
@@ -101,6 +136,7 @@ export default async function handler(req, res) {
       const vidaxlResult = await sendToVidaXL(order);
       console.log('✅ Ordre sendt til VidaXL!', vidaxlResult.order?.id);
       
+      // Svar Shopify EFTER VidaXL success
       res.status(200).json({ 
         success: true,
         vidaxl_order_id: vidaxlResult.order?.id
@@ -109,12 +145,16 @@ export default async function handler(req, res) {
     } catch (vidaxlError) {
       console.error('❌ VidaXL fejl:', vidaxlError.message);
       
-      // TODO: Send error email her
+      // Send error email
+      await sendErrorEmail(order, {
+        error: vidaxlError.message,
+        timestamp: new Date().toISOString()
+      });
       
-      // Svar success til Shopify alligevel (så de ikke prøver igen)
+      // Svar success til Shopify alligevel
       res.status(200).json({ 
         success: false,
-        error: 'VidaXL API fejlede - check logs'
+        error: 'VidaXL API fejlede - email sendt'
       });
     }
     
