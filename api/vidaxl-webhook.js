@@ -120,6 +120,25 @@ export default async function handler(req, res) {
     console.log('✅ Webhook verificeret!');
     
     const order = JSON.parse(rawBody.toString());
+
+        // Check webhook type
+    const topic = req.headers['x-shopify-topic'];
+    console.log('📌 Webhook type:', topic);
+    
+    // Hvis det er en ordre opdatering
+    if (topic === 'orders/updated') {
+      // Check om der er retry kommando i noten
+      const hasRetryNote = order.note && order.note.includes('RETRY');
+      
+      if (!hasRetryNote) {
+        console.log('⏭️ Ordre opdatering uden retry kommando - ignorerer');
+        res.status(200).json({ message: 'Skipped - no retry command' });
+        return;
+      }
+      
+      console.log('🔄 RETRY fundet i note - sender til VidaXL!');
+    }
+
     
     console.log('📦 Ordre detaljer:', {
       name: order.name,
