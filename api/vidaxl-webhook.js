@@ -86,7 +86,14 @@ export default async function handler(req, res) {
     
     const order = JSON.parse(rawBody.toString());
     
-    console.log('📦 Ordre detaljer:', {
+    // SVAR SHOPIFY MED DET SAMME - SUPER VIGTIGT!
+    res.status(200).json({ 
+      success: true,
+      message: 'Webhook modtaget'
+    });
+    
+    // Nu kan vi process order EFTER Shopify har fået svar
+    console.log('📦 Processing ordre:', {
       name: order.name,
       email: order.email,
       products: order.line_items?.map(item => ({
@@ -101,25 +108,16 @@ export default async function handler(req, res) {
       const vidaxlResult = await sendToVidaXL(order);
       console.log('✅ Ordre sendt til VidaXL!', vidaxlResult.order?.id);
       
-      res.status(200).json({ 
-        success: true,
-        vidaxl_order_id: vidaxlResult.order?.id
-      });
-      
     } catch (vidaxlError) {
       console.error('❌ VidaXL fejl:', vidaxlError.message);
-      
-      // TODO: Send error email her
-      
-      // Svar success til Shopify alligevel (så de ikke prøver igen)
-      res.status(200).json({ 
-        success: false,
-        error: 'VidaXL API fejlede - check logs'
-      });
+      // TODO: Send error email med Resend
     }
     
   } catch (error) {
     console.error('❌ Webhook fejl:', error);
-    res.status(500).json({ error: error.message });
+    // Hvis fejl sker FØR vi svarer Shopify, så svar med error
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
   }
 }
