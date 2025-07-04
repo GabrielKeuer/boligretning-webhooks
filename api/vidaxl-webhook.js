@@ -51,11 +51,11 @@ async function sendErrorEmail(order, error) {
           
           <h3>Leveringsadresse:</h3>
           <p>
-            ${order.shipping_address.name}<br>
-            ${order.shipping_address.address1}<br>
-            ${order.shipping_address.address2 ? order.shipping_address.address2 + '<br>' : ''}
-            ${order.shipping_address.zip} ${order.shipping_address.city}<br>
-            ${order.shipping_address.country}
+            ${order.shipping_address?.name || 'Ingen navn'}<br>
+            ${order.shipping_address?.address1 || 'Ingen adresse'}<br>
+            ${order.shipping_address?.address2 ? order.shipping_address.address2 + '<br>' : ''}
+            ${order.shipping_address?.zip || ''} ${order.shipping_address?.city || ''}<br>
+            ${order.shipping_address?.country || ''}
           </p>
           
           <h3>Fejl detaljer:</h3>
@@ -107,22 +107,49 @@ async function sendToVidaXL(order) {
     }))
   };
   
-  const response = await fetch('https://b2b.vidaxl.com/api_customer/orders', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Basic ' + Buffer.from(`${process.env.VIDAXL_EMAIL}:${process.env.VIDAXL_API_TOKEN}`).toString('base64')
-    },
-    body: JSON.stringify(vidaxlOrder)
-  });
+  console.log('📝 VidaXL ordre data:', JSON.stringify(vidaxlOrder, null, 2));
   
-  const result = await response.json();
+  // Tilføj timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 sekunder timeout
   
-  if (!response.ok) {
-    throw new Error(`VidaXL API error: ${JSON.stringify(result)}`);
+  try {
+    console.log('🔌 Kalder VidaXL API...');
+    
+    const response = await fetch('https://b2b.vidaxl.com/api_customer/orders', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Basic ' + Buffer.from(`${process.env.VIDAXL_EMAIL}:${process.env.VIDAXL_API_TOKEN}`).toString('base64')
+      },
+      body: JSON.stringify(vidaxlOrder),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    console.log('📡 VidaXL response status:', response.status);
+    
+    const result = await response.json();
+    console.log('📡 VidaXL response body:', JSON.stringify(result, null, 2));
+    
+    if (!response.ok) {
+      throw new Error(`VidaXL API error (${response.status}): ${JSON.stringify(result)}`);
+    }
+    
+    return result;
+    
+  } catch (error) {
+    clearTimeout(timeoutId);
+    
+    if (error.name === 'AbortError') {
+      console.error('⏰ VidaXL timeout efter 15 sekunder!');
+      throw new Error('VidaXL API timeout - tog for lang tid at svare');
+    }
+    
+    console.error('💥 VidaXL error:', error.message);
+    throw error;
   }
-  
-  return result;
 }
 
 export default async function handler(req, res) {
@@ -150,6 +177,16 @@ export default async function handler(req, res) {
       success: true,
       message: 'Webhook modtaget'
     });
+    
+    // Check om test ordre (uden shipping address)
+    if (!order.shipping_address) {
+      console.log('⚠️ Test ordre uden shipping address - skipper VidaXL');
+      await sendErrorEmail(order, {
+        error: 'Test ordre - mangler leveringsadresse',
+        note: 'Dette er sandsynligvis en test notification fra Shopify'
+      });
+      return;
+    }
     
     // Process order efter Shopify har fået svar
     console.log('📦 Processing ordre:', {
