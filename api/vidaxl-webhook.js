@@ -22,65 +22,6 @@ function verifyWebhook(rawBody, signature) {
   return hash === signature;
 }
 
-async function sendErrorEmail(order, error) {
-  console.log('📧 Sender fejl email...');
-  
-  try {
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        from: 'BoligRetning <onboarding@resend.dev>',
-        to: 'info@boligretning.dk',
-        subject: `VidaXL Ordre Fejl - ${order.name}`,
-        html: `
-          <h2>Ordre kunne ikke sendes til VidaXL</h2>
-          <p><strong>Ordre:</strong> ${order.name}</p>
-          <p><strong>Kunde:</strong> ${order.email}</p>
-          <p><strong>Telefon:</strong> ${order.phone || order.billing_address?.phone || 'Ikke angivet'}</p>
-          
-          <h3>Produkter:</h3>
-          <ul>
-            ${order.line_items.map(item => `
-              <li>${item.quantity}x ${item.sku || 'INGEN SKU'} - ${item.name}</li>
-            `).join('')}
-          </ul>
-          
-          <h3>Leveringsadresse:</h3>
-          <p>
-            ${order.shipping_address?.name || 'Ingen navn'}<br>
-            ${order.shipping_address?.address1 || 'Ingen adresse'}<br>
-            ${order.shipping_address?.address2 ? order.shipping_address.address2 + '<br>' : ''}
-            ${order.shipping_address?.zip || ''} ${order.shipping_address?.city || ''}<br>
-            ${order.shipping_address?.country || ''}
-          </p>
-          
-          <h3>Fejl detaljer:</h3>
-          <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
-${JSON.stringify(error, null, 2)}
-          </pre>
-          
-          <p><a href="https://admin.shopify.com/store/boligretning/orders/${order.id}" 
-                style="background: #5c6ac4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
-                Se ordre i Shopify
-             </a></p>
-        `
-      })
-    });
-    
-    if (!response.ok) {
-      console.error('Email send fejlede:', await response.text());
-    } else {
-      console.log('✅ Fejl email sendt til info@boligretning.dk');
-    }
-  } catch (e) {
-    console.error('Email error:', e);
-  }
-}
-
 async function sendToVidaXL(order) {
   console.log('📤 Sender til VidaXL...');
   
@@ -107,49 +48,22 @@ async function sendToVidaXL(order) {
     }))
   };
   
-  console.log('📝 VidaXL ordre data:', JSON.stringify(vidaxlOrder, null, 2));
+  const response = await fetch('https://b2b.vidaxl.com/api_customer/orders', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Basic ' + Buffer.from(`${process.env.VIDAXL_EMAIL}:${process.env.VIDAXL_API_TOKEN}`).toString('base64')
+    },
+    body: JSON.stringify(vidaxlOrder)
+  });
   
-  // Tilføj timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 sekunder timeout
+  const result = await response.json();
   
-  try {
-    console.log('🔌 Kalder VidaXL API...');
-    
-    const response = await fetch('https://b2b.vidaxl.com/api_customer/orders', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Basic ' + Buffer.from(`${process.env.VIDAXL_EMAIL}:${process.env.VIDAXL_API_TOKEN}`).toString('base64')
-      },
-      body: JSON.stringify(vidaxlOrder),
-      signal: controller.signal
-    });
-    
-    clearTimeout(timeoutId);
-    
-    console.log('📡 VidaXL response status:', response.status);
-    
-    const result = await response.json();
-    console.log('📡 VidaXL response body:', JSON.stringify(result, null, 2));
-    
-    if (!response.ok) {
-      throw new Error(`VidaXL API error (${response.status}): ${JSON.stringify(result)}`);
-    }
-    
-    return result;
-    
-  } catch (error) {
-    clearTimeout(timeoutId);
-    
-    if (error.name === 'AbortError') {
-      console.error('⏰ VidaXL timeout efter 15 sekunder!');
-      throw new Error('VidaXL API timeout - tog for lang tid at svare');
-    }
-    
-    console.error('💥 VidaXL error:', error.message);
-    throw error;
+  if (!response.ok) {
+    throw new Error(`VidaXL API error: ${JSON.stringify(result)}`);
   }
+  
+  return result;
 }
 
 export default async function handler(req, res) {
@@ -172,24 +86,7 @@ export default async function handler(req, res) {
     
     const order = JSON.parse(rawBody.toString());
     
-    // SVAR SHOPIFY MED DET SAMME!
-    res.status(200).json({ 
-      success: true,
-      message: 'Webhook modtaget'
-    });
-    
-    // Check om test ordre (uden shipping address)
-    if (!order.shipping_address) {
-      console.log('⚠️ Test ordre uden shipping address - skipper VidaXL');
-      await sendErrorEmail(order, {
-        error: 'Test ordre - mangler leveringsadresse',
-        note: 'Dette er sandsynligvis en test notification fra Shopify'
-      });
-      return;
-    }
-    
-    // Process order efter Shopify har fået svar
-    console.log('📦 Processing ordre:', {
+    console.log('📦 Ordre detaljer:', {
       name: order.name,
       email: order.email,
       products: order.line_items?.map(item => ({
@@ -204,21 +101,25 @@ export default async function handler(req, res) {
       const vidaxlResult = await sendToVidaXL(order);
       console.log('✅ Ordre sendt til VidaXL!', vidaxlResult.order?.id);
       
+      res.status(200).json({ 
+        success: true,
+        vidaxl_order_id: vidaxlResult.order?.id
+      });
+      
     } catch (vidaxlError) {
       console.error('❌ VidaXL fejl:', vidaxlError.message);
       
-      // Send fejl email
-      await sendErrorEmail(order, {
-        error: vidaxlError.message,
-        timestamp: new Date().toISOString(),
-        order_reference: order.name
+      // TODO: Send error email her
+      
+      // Svar success til Shopify alligevel (så de ikke prøver igen)
+      res.status(200).json({ 
+        success: false,
+        error: 'VidaXL API fejlede - check logs'
       });
     }
     
   } catch (error) {
     console.error('❌ Webhook fejl:', error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
+    res.status(500).json({ error: error.message });
   }
 }
