@@ -16,7 +16,7 @@ async function getRawBody(req) {
 
 function verifyWebhook(rawBody, signature) {
   const hash = crypto
-    .createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET)
+    .createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET2)
     .update(rawBody, 'utf8')
     .digest('base64');
   return hash === signature;
