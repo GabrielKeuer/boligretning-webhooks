@@ -39,23 +39,35 @@ export default async function handler(req, res) {
     }
     
     // STEP 1: Hent fulfillment orders
-    console.log('📋 Henter fulfillment orders...');
+    console.log('📋 Henter fulfillment orders for ordre ID:', order.id);
     
-    const fulfillmentOrdersResponse = await fetch(
-      `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${order.id}/fulfillment_orders.json`,
-      {
-        headers: {
-          'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
-          'Content-Type': 'application/json'
-        }
+    const fulfillmentOrdersUrl = `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${order.id}/fulfillment_orders.json`;
+    console.log('URL:', fulfillmentOrdersUrl);
+    
+    const fulfillmentOrdersResponse = await fetch(fulfillmentOrdersUrl, {
+      headers: {
+        'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
+        'Content-Type': 'application/json'
       }
-    );
+    });
+    
+    console.log('Response status:', fulfillmentOrdersResponse.status);
+    
+    const responseText = await fulfillmentOrdersResponse.text();
+    console.log('Response body:', responseText);
     
     if (!fulfillmentOrdersResponse.ok) {
-      throw new Error('Kunne ikke hente fulfillment orders');
+      throw new Error(`Fulfillment orders error ${fulfillmentOrdersResponse.status}: ${responseText}`);
     }
     
-    const { fulfillment_orders } = await fulfillmentOrdersResponse.json();
+    let fulfillmentOrdersData;
+    try {
+      fulfillmentOrdersData = JSON.parse(responseText);
+    } catch (e) {
+      throw new Error('Invalid JSON from fulfillment orders endpoint');
+    }
+    
+    const fulfillment_orders = fulfillmentOrdersData.fulfillment_orders;
     console.log(`📦 Fandt ${fulfillment_orders?.length || 0} fulfillment orders`);
     
     if (!fulfillment_orders || fulfillment_orders.length === 0) {
@@ -91,7 +103,7 @@ export default async function handler(req, res) {
       }
     };
     
-    console.log('📤 Opretter fulfillment...');
+    console.log('📤 Opretter fulfillment med data:', JSON.stringify(fulfillmentData, null, 2));
     
     const fulfillmentResponse = await fetch(
       `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/fulfillments.json`,
@@ -105,21 +117,15 @@ export default async function handler(req, res) {
       }
     );
     
-    const responseText = await fulfillmentResponse.text();
-    console.log('Response status:', fulfillmentResponse.status);
+    const fulfillmentResponseText = await fulfillmentResponse.text();
+    console.log('Fulfillment response status:', fulfillmentResponse.status);
+    console.log('Fulfillment response:', fulfillmentResponseText);
     
     if (!fulfillmentResponse.ok) {
-      let errorMessage = `Shopify error ${fulfillmentResponse.status}`;
-      try {
-        const errorData = JSON.parse(responseText);
-        errorMessage += `: ${JSON.stringify(errorData)}`;
-      } catch (e) {
-        errorMessage += `: ${responseText}`;
-      }
-      throw new Error(errorMessage);
+      throw new Error(`Fulfillment error ${fulfillmentResponse.status}: ${fulfillmentResponseText}`);
     }
     
-    const result = JSON.parse(responseText);
+    const result = JSON.parse(fulfillmentResponseText);
     console.log('✅ SUCCESS! Fulfillment oprettet:', result.fulfillment?.id);
     
     return res.json({
