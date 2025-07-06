@@ -53,10 +53,13 @@ export default async function handler(req, res) {
       if (order.status_order_name === 'Sent' && order.shipping_tracking) {
         
         if (TEST_MODE) {
-          // TEST MODE: Vis hvad der VILLE ske
+          // TEST MODE: Vis ALLE detaljer
           console.log('🧪 TEST MODE - Ville gøre:', {
             ordre: order.customer_order_reference,
             tracking: order.shipping_tracking,
+            tracking_url: order.shipping_tracking_url,
+            tracking_urls: order.shipping_tracking_urls_by_number,
+            carrier: order.shipping_option_name,
             kunde: order.customer_email,
             handling: 'Oprette fulfillment og sende tracking email'
           });
@@ -64,7 +67,9 @@ export default async function handler(req, res) {
           results.push({
             ordre: order.customer_order_reference,
             status: 'TEST - ikke sendt',
-            tracking: order.shipping_tracking
+            tracking: order.shipping_tracking,
+            tracking_url: order.shipping_tracking_url || 'Ingen URL',
+            carrier: order.shipping_option_name || 'Ukendt'
           });
           
         } else {
@@ -123,20 +128,52 @@ export default async function handler(req, res) {
   }
 }
 
-async function findShopifyOrder(orderName) {
+async function findShopifyOrder(orderReference) {
   try {
-    const response = await fetch(
-      `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders.json?name=${orderName}&status=any`,
-      {
-        headers: {
-          'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
-          'Content-Type': 'application/json'
+    // Check om det er et ordre nummer (starter med #36)
+    if (orderReference.startsWith('#36') || orderReference.startsWith('36')) {
+      // Det er et ordre nummer - søg efter det
+      const orderName = orderReference.startsWith('#') ? orderReference : `#${orderReference}`;
+      console.log(`🔍 Søger efter ordre nummer: ${orderName}`);
+      
+      const searchResponse = await fetch(
+        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders.json?name=${orderName}&status=any`,
+        {
+          headers: {
+            'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
+            'Content-Type': 'application/json'
+          }
         }
+      );
+      
+      const searchData = await searchResponse.json();
+      if (searchData.orders?.[0]) {
+        console.log(`✅ Fandt ordre via nummer: ${orderName}`);
+        return searchData.orders[0];
       }
-    );
+    } else {
+      // Det er et ordre ID - hent direkte
+      console.log(`🔍 Henter ordre via ID: ${orderReference}`);
+      
+      const response = await fetch(
+        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${orderReference}.json`,
+        {
+          headers: {
+            'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`✅ Fandt ordre via ID: ${orderReference}`);
+        return data.order;
+      }
+    }
     
-    const data = await response.json();
-    return data.orders?.[0] || null;
+    console.log(`❌ Ordre ikke fundet: ${orderReference}`);
+    return null;
     
   } catch (error) {
     console.error('Shopify søgefejl:', error);
@@ -184,7 +221,7 @@ function detectCarrier(trackingUrl) {
   if (url.includes('dao')) return 'DAO';
   if (url.includes('ups')) return 'UPS';
   if (url.includes('dhl')) return 'DHL';
-  if (url.includes('dpd')) return 'DPD';  // ← TILFØJ DENNE
-  if (url.includes('bring')) return 'Bring';  // Hvis I også bruger Bring
+  if (url.includes('dpd')) return 'DPD';
+  if (url.includes('bring')) return 'Bring';
   return 'Other';
 }
