@@ -45,15 +45,16 @@ export default async function handler(req, res) {
         tracking_number: trackingNumber,
         tracking_urls: [trackingUrl],
         tracking_company: detectCarrier(trackingUrl),
-        notify_customer: true, // Sender tracking email!
-        line_items: [] // Tom = fulfill alle items
+        notify_customer: true,
+        line_items: []
       }
     };
     
     console.log('📦 Opretter fulfillment med:', {
       tracking: trackingNumber,
       carrier: detectCarrier(trackingUrl),
-      url: trackingUrl
+      url: trackingUrl,
+      order_id: order.id
     });
     
     const fulfillmentResponse = await fetch(
@@ -68,14 +69,45 @@ export default async function handler(req, res) {
       }
     );
     
-    if (!fulfillmentResponse.ok) {
-      const error = await fulfillmentResponse.json();
-      throw new Error(JSON.stringify(error.errors || error));
+    console.log('Shopify response status:', fulfillmentResponse.status);
+    
+    // Læs response body som text først
+    let responseText = '';
+    try {
+      responseText = await fulfillmentResponse.text();
+      console.log('Response body length:', responseText.length);
+      if (responseText.length > 0) {
+        console.log('Response preview:', responseText.substring(0, 200));
+      }
+    } catch (e) {
+      console.log('Could not read response body:', e);
     }
     
-    const result = await fulfillmentResponse.json();
+    // Check om request fejlede
+    if (!fulfillmentResponse.ok) {
+      let errorMessage = `Shopify error ${fulfillmentResponse.status}`;
+      if (responseText) {
+        try {
+          const errorData = JSON.parse(responseText);
+          errorMessage += `: ${JSON.stringify(errorData.errors || errorData)}`;
+        } catch (e) {
+          errorMessage += `: ${responseText}`;
+        }
+      }
+      throw new Error(errorMessage);
+    }
     
-    console.log('✅ SUCCESS! Fulfillment oprettet:', result.fulfillment.id);
+    // Parse success response
+    let result = { fulfillment: { id: 'unknown' } };
+    if (responseText) {
+      try {
+        result = JSON.parse(responseText);
+      } catch (e) {
+        console.log('Warning: Could not parse success response');
+      }
+    }
+    
+    console.log('✅ SUCCESS! Fulfillment oprettet:', result.fulfillment?.id || 'ID unknown');
     
     return res.json({
       success: true,
@@ -86,7 +118,7 @@ export default async function handler(req, res) {
         customer: order.email
       },
       fulfillment: {
-        id: result.fulfillment.id,
+        id: result.fulfillment?.id || 'unknown',
         tracking_number: trackingNumber,
         tracking_company: detectCarrier(trackingUrl),
         email_sent: true
