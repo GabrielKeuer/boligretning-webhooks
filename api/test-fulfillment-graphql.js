@@ -68,29 +68,85 @@ export default async function handler(req, res) {
     const fulfillmentOrder = fulfillmentOrders[0].node;
     console.log('🎯 Bruger fulfillment order:', fulfillmentOrder.id);
     
-    // STEP 3: Håndter multiple tracking numre
+    // STEP 3: Håndter multiple tracking numre med AUTO-DETECTION
     const trackingNumbers = trackingNumber.split(',').map(num => num.trim());
-    const trackingUrls = [];
+    const trackingDataArray = [];
     
     console.log(`📦 Håndterer ${trackingNumbers.length} tracking numre`);
     
-    // Generer separate URLs for hvert tracking nummer
-    if (trackingNumbers.length > 1) {
-      trackingNumbers.forEach(num => {
-        let individualUrl = trackingUrl;
-        
+    // Auto-detect carrier for hvert tracking nummer
+    trackingNumbers.forEach(num => {
+      let detectedCarrier = carrier; // Default carrier fra input
+      let individualUrl = '';
+      
+      // Auto-detect baseret på format
+      if (num.match(/^\d{14,15}$/)) {
+        // DPD format: 14-15 cifre
+        detectedCarrier = 'DPD';
+        individualUrl = `https://tracking.dpd.de/parcelstatus?query=${num}`;
+      } else if (num.match(/^[A-Z0-9]{8}$/)) {
+        // GLS format: 8 alfanumeriske karakterer
+        detectedCarrier = 'GLS';
+        individualUrl = `https://gls-group.eu/EU/en/parcel-tracking?match=${num}`;
+      } else if (num.match(/^\d{18}$/)) {
+        // PostNord format: 18 cifre
+        detectedCarrier = 'PostNord';
+        individualUrl = `https://www.postnord.dk/en/track-and-trace?id=${num}`;
+      } else if (num.match(/^7\d{13}$/)) {
+        // DAO format: starter med 7 og har 14 cifre
+        detectedCarrier = 'DAO';
+        individualUrl = `https://www.dao.as/tracking?code=${num}`;
+      } else if (num.match(/^1Z[A-Z0-9]+$/)) {
+        // UPS format: starter med 1Z
+        detectedCarrier = 'UPS';
+        individualUrl = `https://www.ups.com/track?tracknum=${num}`;
+      } else if (num.match(/^\d{10}$/)) {
+        // DHL format: 10 cifre
+        detectedCarrier = 'DHL';
+        individualUrl = `https://www.dhl.com/en/express/tracking.html?AWB=${num}`;
+      } else if (trackingUrl.includes(',')) {
+        // Hvis URL har komma-separerede numre, split og match
         if (trackingUrl.includes('query=')) {
           individualUrl = trackingUrl.replace(/query=[\d,]+/, `query=${num}`);
         } else if (trackingUrl.includes('match=')) {
           individualUrl = trackingUrl.replace(/match=[\w,]+/, `match=${num}`);
+        } else {
+          individualUrl = trackingUrl;
         }
-        
-        trackingUrls.push(individualUrl);
-        console.log(`   📌 ${num} → ${individualUrl}`);
+      } else {
+        // Fallback: brug input URL
+        individualUrl = trackingUrl;
+      }
+      
+      trackingDataArray.push({
+        number: num,
+        carrier: detectedCarrier,
+        url: individualUrl
       });
-    } else {
-      trackingUrls.push(trackingUrl);
+      
+      console.log(`   📌 ${num} → Detected: ${detectedCarrier} → ${individualUrl}`);
+    });
+    
+    // Check om alle har samme carrier
+    const uniqueCarriers = [...new Set(trackingDataArray.map(t => t.carrier))];
+    
+    if (uniqueCarriers.length > 1) {
+      console.log('⚠️ ADVARSEL: Multiple carriers detected:', uniqueCarriers);
+      console.log('📝 Shopify understøtter kun én carrier per fulfillment');
+      console.log('🔄 Bruger mest almindelige carrier eller første:', trackingDataArray[0].carrier);
     }
+    
+    // Find mest almindelige carrier eller brug første
+    const carrierCounts = {};
+    trackingDataArray.forEach(t => {
+      carrierCounts[t.carrier] = (carrierCounts[t.carrier] || 0) + 1;
+    });
+    const finalCarrier = Object.keys(carrierCounts).reduce((a, b) => 
+      carrierCounts[a] > carrierCounts[b] ? a : b
+    );
+    
+    // Ekstrahér tracking URLs
+    const trackingUrls = trackingDataArray.map(t => t.url);
     
     // STEP 4: Opret fulfillment med GraphQL mutation
     const createFulfillmentMutation = `
@@ -113,13 +169,13 @@ export default async function handler(req, res) {
       }
     `;
     
-    // Byg line items array med KORREKT struktur
+    // Byg line items array
     const lineItems = fulfillmentOrder.lineItems.edges.map(edge => ({
       id: edge.node.id,
       quantity: edge.node.remainingQuantity
     }));
     
-    // Byg fulfillment input med KORREKT struktur
+    // Byg fulfillment input
     const fulfillmentInput = {
       fulfillment: {
         lineItemsByFulfillmentOrder: [
@@ -130,9 +186,9 @@ export default async function handler(req, res) {
         ],
         notifyCustomer: true,
         trackingInfo: {
-          company: carrier,
-          numbers: trackingNumbers,  // ARRAY af tracking numre!
-          urls: trackingUrls        // ARRAY af tracking URLs!
+          company: finalCarrier,
+          numbers: trackingNumbers,  // Original array af tracking numre
+          urls: trackingUrls        // Array af genererede URLs
         }
       }
     };
@@ -158,7 +214,9 @@ export default async function handler(req, res) {
       fulfillment: {
         id: fulfillment.id,
         status: fulfillment.status,
-        trackingInfo: fulfillment.trackingInfo
+        trackingInfo: fulfillment.trackingInfo,
+        detectedCarriers: uniqueCarriers,
+        finalCarrier: finalCarrier
       }
     });
     
