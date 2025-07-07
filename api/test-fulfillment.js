@@ -106,7 +106,7 @@ export default async function handler(req, res) {
     
     console.log('🔗 Genererede tracking URLs:', trackingUrls);
     
-    // STEP 3: Opret fulfillment med korrekt format
+    // STEP 3: Opret fulfillment - MATCHER EMAIL TEMPLATE FORMAT
     const fulfillmentData = {
       fulfillment: {
         line_items_by_fulfillment_order: [
@@ -118,11 +118,9 @@ export default async function handler(req, res) {
             }))
           }
         ],
-        tracking_info: {
-          number: trackingNumbers.join(', '),  // "01475240430954, 01475240430955"
-          urls: trackingUrls,                  // Array med separate URLs
-          company: carrier
-        },
+        tracking_numbers: trackingNumbers,    // Array: ["01475240430954", "01475240430955"]
+        tracking_urls: trackingUrls,          // Array med separate URLs
+        tracking_company: carrier,            // "DPD_DE"
         notify_customer: true
       }
     };
