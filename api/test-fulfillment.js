@@ -74,49 +74,39 @@ export default async function handler(req, res) {
       location: fulfillmentOrder.assigned_location?.name
     });
     
-    // STEP 2: Håndter multiple tracking numre
+    // STEP 2: Håndter tracking fra VidaXL format
     const trackingNumbers = trackingNumber.split(',').map(num => num.trim());
     const trackingUrls = [];
     
     console.log(`📦 Håndterer ${trackingNumbers.length} tracking numre`);
     
-    // Generer separate URLs for hvert tracking nummer
-    trackingNumbers.forEach(num => {
-      let individualUrl = '';
-      
-      // Byg URL baseret på carrier type
-      if (carrier === 'DPD' || carrier === 'DPD_DE') {
-        individualUrl = `https://tracking.dpd.de/parcelstatus?query=${num}`;
-      } else if (carrier === 'GLS') {
-        individualUrl = `https://gls-group.eu/EU/en/parcel-tracking?match=${num}`;
-      } else if (carrier === 'PostNord') {
-        individualUrl = `https://www.postnord.dk/en/track-and-trace?id=${num}`;
-      } else if (carrier === 'DAO') {
-        individualUrl = `https://www.dao.as/tracking?code=${num}`;
-      } else if (carrier === 'Bring') {
-        individualUrl = `https://tracking.bring.com/tracking.html?q=${num}`;
-      } else if (carrier === 'UPS') {
-        individualUrl = `https://www.ups.com/track?tracknum=${num}`;
-      } else if (carrier === 'DHL') {
-        individualUrl = `https://www.dhl.com/en/express/tracking.html?AWB=${num}`;
-      } else {
-        // Fallback - brug original URL logik
+    // Hvis der er flere tracking numre, lav separate URLs
+    if (trackingNumbers.length > 1) {
+      // For DPD og andre hvor URL har kombinerede numre
+      trackingNumbers.forEach(num => {
+        let individualUrl = trackingUrl;
+        
+        // Håndter forskellige URL formater
         if (trackingUrl.includes('query=')) {
-          individualUrl = trackingUrl.replace(/query=.*/, `query=${num}`);
+          // DPD format: erstatter combined query med enkelt nummer
+          individualUrl = trackingUrl.replace(/query=[\d,]+/, `query=${num}`);
         } else if (trackingUrl.includes('match=')) {
-          individualUrl = trackingUrl.replace(/match=.*/, `match=${num}`);
-        } else {
-          individualUrl = `${trackingUrl}${num}`;
+          // GLS format (hvis de nogensinde sender multiple)
+          individualUrl = trackingUrl.replace(/match=[\w,]+/, `match=${num}`);
         }
-      }
-      
-      trackingUrls.push(individualUrl);
-      console.log(`   📌 Tracking ${num} → ${individualUrl}`);
-    });
+        
+        trackingUrls.push(individualUrl);
+        console.log(`   📌 ${num} → ${individualUrl}`);
+      });
+    } else {
+      // Enkelt tracking nummer - brug URL som den er
+      trackingUrls.push(trackingUrl);
+      console.log(`   📌 ${trackingNumbers[0]} → ${trackingUrl}`);
+    }
     
     console.log('🔗 Genererede tracking URLs:', trackingUrls);
     
-    // STEP 3: Opret fulfillment med nye API format - ÆNDRET HER
+    // STEP 3: Opret fulfillment med korrekt format
     const fulfillmentData = {
       fulfillment: {
         line_items_by_fulfillment_order: [
@@ -128,14 +118,16 @@ export default async function handler(req, res) {
             }))
           }
         ],
-        tracking_numbers: trackingNumbers, // Array af tracking numre
-        tracking_urls: trackingUrls,       // Array af URLs
-        tracking_company: carrier,         // Carrier navn
+        tracking_info: {
+          number: trackingNumbers.join(', '),  // "01475240430954, 01475240430955"
+          urls: trackingUrls,                  // Array med separate URLs
+          company: carrier
+        },
         notify_customer: true
       }
     };
     
-    console.log('📤 Opretter fulfillment...');
+    console.log('📤 Opretter fulfillment med data:', JSON.stringify(fulfillmentData, null, 2));
     
     const fulfillmentResponse = await fetch(
       `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/fulfillments.json`,
@@ -153,6 +145,7 @@ export default async function handler(req, res) {
     console.log('Fulfillment response status:', fulfillmentResponse.status);
     
     if (!fulfillmentResponse.ok) {
+      console.error('Fulfillment error response:', fulfillmentResponseText);
       throw new Error(`Fulfillment error ${fulfillmentResponse.status}: ${fulfillmentResponseText}`);
     }
     
