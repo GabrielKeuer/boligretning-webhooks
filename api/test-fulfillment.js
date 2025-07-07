@@ -9,10 +9,10 @@ export default async function handler(req, res) {
   const trackingUrl = req.body.url || "https://gls-group.eu/EU/en/parcel-tracking?match=YNZX9BHU";
   const carrier = req.body.carrier || "GLS";
   
-  console.log('🧪 TEST FULFILLMENT for ordre:', orderNumber);
+  console.log('🧪 TEST FULFILLMENT GRAPHQL for ordre:', orderNumber);
   
   try {
-    // Find ordre i Shopify
+    // STEP 1: Find ordre ID via REST API først
     const order = await findShopifyOrder(orderNumber);
     
     if (!order) {
@@ -25,119 +25,135 @@ export default async function handler(req, res) {
     console.log('✅ Ordre fundet:', {
       name: order.name,
       id: order.id,
-      status: order.fulfillment_status,
-      customer: order.email
+      status: order.fulfillment_status
     });
     
-    // Check om allerede fulfilled
-    if (order.fulfillment_status === 'fulfilled') {
-      return res.json({ 
-        message: 'Ordre allerede fulfilled',
-        order_name: order.name,
-        status: 'skipped'
-      });
-    }
-    
-    // STEP 1: Hent fulfillment orders
-    console.log('📋 Henter fulfillment orders for ordre ID:', order.id);
-    
-    const fulfillmentOrdersUrl = `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${order.id}/fulfillment_orders.json`;
-    
-    const fulfillmentOrdersResponse = await fetch(fulfillmentOrdersUrl, {
-      headers: {
-        'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
-        'Content-Type': 'application/json'
+    // STEP 2: Hent fulfillment orders via GraphQL
+    const fulfillmentOrdersQuery = `
+      query getFulfillmentOrders($orderId: ID!) {
+        order(id: $orderId) {
+          fulfillmentOrders(first: 10) {
+            edges {
+              node {
+                id
+                status
+                lineItems(first: 50) {
+                  edges {
+                    node {
+                      id
+                      remainingQuantity
+                      lineItem {
+                        id
+                        name
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
-    });
+    `;
     
-    console.log('Response status:', fulfillmentOrdersResponse.status);
+    const gqlOrderId = `gid://shopify/Order/${order.id}`;
     
-    const responseText = await fulfillmentOrdersResponse.text();
+    const foResponse = await shopifyGraphQL(fulfillmentOrdersQuery, { orderId: gqlOrderId });
+    const fulfillmentOrders = foResponse.data.order.fulfillmentOrders.edges;
     
-    if (!fulfillmentOrdersResponse.ok) {
-      throw new Error(`Fulfillment orders error ${fulfillmentOrdersResponse.status}: ${responseText}`);
-    }
-    
-    const fulfillmentOrdersData = JSON.parse(responseText);
-    const fulfillment_orders = fulfillmentOrdersData.fulfillment_orders;
-    console.log(`📦 Fandt ${fulfillment_orders?.length || 0} fulfillment orders`);
-    
-    if (!fulfillment_orders || fulfillment_orders.length === 0) {
+    if (!fulfillmentOrders || fulfillmentOrders.length === 0) {
       throw new Error('Ingen fulfillment orders fundet');
     }
     
-    // Tag første fulfillment order
-    const fulfillmentOrder = fulfillment_orders[0];
-    console.log('🎯 Bruger fulfillment order:', {
-      id: fulfillmentOrder.id,
-      status: fulfillmentOrder.status,
-      location: fulfillmentOrder.assigned_location?.name
-    });
+    const fulfillmentOrder = fulfillmentOrders[0].node;
+    console.log('🎯 Bruger fulfillment order:', fulfillmentOrder.id);
     
-    // STEP 2: Håndter tracking numre
+    // STEP 3: Håndter multiple tracking numre
     const trackingNumbers = trackingNumber.split(',').map(num => num.trim());
+    const trackingUrls = [];
+    
     console.log(`📦 Håndterer ${trackingNumbers.length} tracking numre`);
     
-    // STEP 3: Opret fulfillment - SIMPELT FORMAT
-    const fulfillmentData = {
-      fulfillment: {
-        line_items_by_fulfillment_order: [
-          {
-            fulfillment_order_id: fulfillmentOrder.id,
-            fulfillment_order_line_items: fulfillmentOrder.line_items.map(item => ({
-              id: item.id,
-              quantity: item.quantity
-            }))
+    // Generer separate URLs for hvert tracking nummer
+    if (trackingNumbers.length > 1) {
+      trackingNumbers.forEach(num => {
+        let individualUrl = trackingUrl;
+        
+        if (trackingUrl.includes('query=')) {
+          individualUrl = trackingUrl.replace(/query=[\d,]+/, `query=${num}`);
+        } else if (trackingUrl.includes('match=')) {
+          individualUrl = trackingUrl.replace(/match=[\w,]+/, `match=${num}`);
+        }
+        
+        trackingUrls.push(individualUrl);
+        console.log(`   📌 ${num} → ${individualUrl}`);
+      });
+    } else {
+      trackingUrls.push(trackingUrl);
+    }
+    
+    // STEP 4: Opret fulfillment med GraphQL mutation
+    const createFulfillmentMutation = `
+      mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) {
+        fulfillmentCreateV2(fulfillment: $fulfillment) {
+          fulfillment {
+            id
+            status
+            trackingInfo(first: 10) {
+              company
+              number
+              url
+            }
           }
-        ],
-        tracking_info: {
-          number: trackingNumbers.join(', '),     // "01475240430954, 01475240430955"
-          url: trackingUrl,                       // Original URL fra VidaXL
-          company: carrier
-        },
-        notify_customer: true
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    // Byg line items array
+    const lineItems = fulfillmentOrder.lineItems.edges.map(edge => ({
+      fulfillmentOrderLineItemId: edge.node.id,
+      quantity: edge.node.remainingQuantity
+    }));
+    
+    // Byg fulfillment input med MULTIPLE tracking
+    const fulfillmentInput = {
+      fulfillment: {
+        fulfillmentOrderLineItems: lineItems,
+        notifyCustomer: true,
+        trackingInfo: {
+          company: carrier,
+          numbers: trackingNumbers,  // ARRAY af tracking numre!
+          urls: trackingUrls        // ARRAY af tracking URLs!
+        }
       }
     };
     
-    console.log('📤 Opretter fulfillment med data:', JSON.stringify(fulfillmentData, null, 2));
+    console.log('📤 Opretter fulfillment med GraphQL:', JSON.stringify(fulfillmentInput, null, 2));
     
-    const fulfillmentResponse = await fetch(
-      `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/fulfillments.json`,
-      {
-        method: 'POST',
-        headers: {
-          'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(fulfillmentData)
-      }
-    );
+    const result = await shopifyGraphQL(createFulfillmentMutation, fulfillmentInput);
     
-    const fulfillmentResponseText = await fulfillmentResponse.text();
-    console.log('Fulfillment response status:', fulfillmentResponse.status);
-    
-    if (!fulfillmentResponse.ok) {
-      console.error('Fulfillment error response:', fulfillmentResponseText);
-      throw new Error(`Fulfillment error ${fulfillmentResponse.status}: ${fulfillmentResponseText}`);
+    if (result.data.fulfillmentCreateV2.userErrors.length > 0) {
+      throw new Error(JSON.stringify(result.data.fulfillmentCreateV2.userErrors));
     }
     
-    const result = JSON.parse(fulfillmentResponseText);
-    console.log('✅ SUCCESS! Fulfillment oprettet:', result.fulfillment?.id);
+    const fulfillment = result.data.fulfillmentCreateV2.fulfillment;
+    console.log('✅ SUCCESS! Fulfillment oprettet:', fulfillment.id);
     
     return res.json({
       success: true,
-      message: 'Fulfillment oprettet og tracking email sendt!',
+      message: 'Fulfillment oprettet via GraphQL med multiple tracking!',
       order: {
         name: order.name,
-        id: order.id,
-        customer: order.email
+        id: order.id
       },
       fulfillment: {
-        id: result.fulfillment?.id,
-        tracking_number: trackingNumbers.join(', '),
-        tracking_url: trackingUrl,
-        tracking_company: carrier,
-        email_sent: true
+        id: fulfillment.id,
+        status: fulfillment.status,
+        trackingInfo: fulfillment.trackingInfo
       }
     });
     
@@ -150,15 +166,41 @@ export default async function handler(req, res) {
   }
 }
 
+// GraphQL helper funktion
+async function shopifyGraphQL(query, variables = {}) {
+  const response = await fetch(
+    `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2025-01/graphql.json`,
+    {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query,
+        variables
+      })
+    }
+  );
+  
+  const data = await response.json();
+  
+  if (data.errors) {
+    throw new Error(JSON.stringify(data.errors));
+  }
+  
+  return data;
+}
+
+// Genbrug samme findShopifyOrder funktion
 async function findShopifyOrder(orderReference) {
   try {
-    // Check om det er et ordre nummer (starter med #36)
     if (orderReference.startsWith('#36') || orderReference.startsWith('36')) {
       const orderName = orderReference.startsWith('#') ? orderReference : `#${orderReference}`;
       console.log(`🔍 Søger efter ordre nummer: ${orderName}`);
       
       const searchResponse = await fetch(
-        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders.json?name=${orderName}&status=any`,
+        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2025-01/orders.json?name=${orderName}&status=any`,
         {
           headers: {
             'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
@@ -172,45 +214,12 @@ async function findShopifyOrder(orderReference) {
         console.log(`✅ Fandt ordre via nummer: ${orderName}`);
         return searchData.orders[0];
       }
-    } else {
-      // Det er et ordre ID - hent direkte
-      console.log(`🔍 Henter ordre via ID: ${orderReference}`);
-      
-      const response = await fetch(
-        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${orderReference}.json`,
-        {
-          headers: {
-            'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-      
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`✅ Fandt ordre via ID: ${orderReference}`);
-        return data.order;
-      }
     }
     
-    console.log(`❌ Ordre ikke fundet: ${orderReference}`);
     return null;
     
   } catch (error) {
     console.error('Shopify søgefejl:', error);
     return null;
   }
-}
-
-function detectCarrier(trackingUrl) {
-  if (!trackingUrl) return 'Other';
-  const url = trackingUrl.toLowerCase();
-  if (url.includes('postnord')) return 'PostNord';
-  if (url.includes('gls')) return 'GLS';
-  if (url.includes('dao')) return 'DAO';
-  if (url.includes('ups')) return 'UPS';
-  if (url.includes('dhl')) return 'DHL';
-  if (url.includes('dpd')) return 'DPD';
-  if (url.includes('bring')) return 'Bring';
-  return 'Other';
 }
