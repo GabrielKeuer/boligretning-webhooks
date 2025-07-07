@@ -113,16 +113,21 @@ export default async function handler(req, res) {
       }
     `;
     
-    // Byg line items array
+    // Byg line items array med KORREKT struktur
     const lineItems = fulfillmentOrder.lineItems.edges.map(edge => ({
-      fulfillmentOrderLineItemId: edge.node.id,
+      id: edge.node.id,
       quantity: edge.node.remainingQuantity
     }));
     
-    // Byg fulfillment input med MULTIPLE tracking
+    // Byg fulfillment input med KORREKT struktur
     const fulfillmentInput = {
       fulfillment: {
-        fulfillmentOrderLineItems: lineItems,
+        lineItemsByFulfillmentOrder: [
+          {
+            fulfillmentOrderId: fulfillmentOrder.id,
+            fulfillmentOrderLineItems: lineItems
+          }
+        ],
         notifyCustomer: true,
         trackingInfo: {
           company: carrier,
@@ -214,8 +219,28 @@ async function findShopifyOrder(orderReference) {
         console.log(`✅ Fandt ordre via nummer: ${orderName}`);
         return searchData.orders[0];
       }
+    } else {
+      // Det er et ordre ID - hent direkte
+      console.log(`🔍 Henter ordre via ID: ${orderReference}`);
+      
+      const response = await fetch(
+        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2025-01/orders/${orderReference}.json`,
+        {
+          headers: {
+            'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`✅ Fandt ordre via ID: ${orderReference}`);
+        return data.order;
+      }
     }
     
+    console.log(`❌ Ordre ikke fundet: ${orderReference}`);
     return null;
     
   } catch (error) {
