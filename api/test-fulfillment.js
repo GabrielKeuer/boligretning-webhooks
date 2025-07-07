@@ -42,7 +42,6 @@ export default async function handler(req, res) {
     console.log('📋 Henter fulfillment orders for ordre ID:', order.id);
     
     const fulfillmentOrdersUrl = `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${order.id}/fulfillment_orders.json`;
-    console.log('URL:', fulfillmentOrdersUrl);
     
     const fulfillmentOrdersResponse = await fetch(fulfillmentOrdersUrl, {
       headers: {
@@ -54,19 +53,12 @@ export default async function handler(req, res) {
     console.log('Response status:', fulfillmentOrdersResponse.status);
     
     const responseText = await fulfillmentOrdersResponse.text();
-    console.log('Response body:', responseText);
     
     if (!fulfillmentOrdersResponse.ok) {
       throw new Error(`Fulfillment orders error ${fulfillmentOrdersResponse.status}: ${responseText}`);
     }
     
-    let fulfillmentOrdersData;
-    try {
-      fulfillmentOrdersData = JSON.parse(responseText);
-    } catch (e) {
-      throw new Error('Invalid JSON from fulfillment orders endpoint');
-    }
-    
+    const fulfillmentOrdersData = JSON.parse(responseText);
     const fulfillment_orders = fulfillmentOrdersData.fulfillment_orders;
     console.log(`📦 Fandt ${fulfillment_orders?.length || 0} fulfillment orders`);
     
@@ -82,7 +74,29 @@ export default async function handler(req, res) {
       location: fulfillmentOrder.assigned_location?.name
     });
     
-    // STEP 2: Opret fulfillment med nye API format
+    // STEP 2: Håndter multiple tracking numre
+    const trackingNumbers = trackingNumber.split(',').map(num => num.trim());
+    const trackingUrls = [];
+    
+    console.log(`📦 Håndterer ${trackingNumbers.length} tracking numre`);
+    
+    // Generer separate URLs for hvert tracking nummer
+    trackingNumbers.forEach(num => {
+      if (trackingUrl.includes('query=')) {
+        // For DPD og lignende med query parameter
+        trackingUrls.push(trackingUrl.replace(/query=.*/, `query=${num}`));
+      } else if (trackingUrl.includes('match=')) {
+        // For GLS med match parameter
+        trackingUrls.push(trackingUrl.replace(/match=.*/, `match=${num}`));
+      } else {
+        // For andre typer URLs - tilføj tracking nummer til sidst
+        trackingUrls.push(`${trackingUrl}${num}`);
+      }
+    });
+    
+    console.log('🔗 Genererede tracking URLs:', trackingUrls);
+    
+    // STEP 3: Opret fulfillment med nye API format
     const fulfillmentData = {
       fulfillment: {
         line_items_by_fulfillment_order: [
@@ -95,15 +109,15 @@ export default async function handler(req, res) {
           }
         ],
         tracking_info: {
-          number: trackingNumber,
-          url: trackingUrl,
+          number: trackingNumbers.join(', '), // Viser: "01475240430954, 01475240430955"
+          urls: trackingUrls, // Array med separate URLs for hvert nummer
           company: detectCarrier(trackingUrl)
         },
         notify_customer: true
       }
     };
     
-    console.log('📤 Opretter fulfillment med data:', JSON.stringify(fulfillmentData, null, 2));
+    console.log('📤 Opretter fulfillment...');
     
     const fulfillmentResponse = await fetch(
       `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/fulfillments.json`,
@@ -119,7 +133,6 @@ export default async function handler(req, res) {
     
     const fulfillmentResponseText = await fulfillmentResponse.text();
     console.log('Fulfillment response status:', fulfillmentResponse.status);
-    console.log('Fulfillment response:', fulfillmentResponseText);
     
     if (!fulfillmentResponse.ok) {
       throw new Error(`Fulfillment error ${fulfillmentResponse.status}: ${fulfillmentResponseText}`);
@@ -138,7 +151,8 @@ export default async function handler(req, res) {
       },
       fulfillment: {
         id: result.fulfillment?.id,
-        tracking_number: trackingNumber,
+        tracking_numbers: trackingNumbers,
+        tracking_urls: trackingUrls,
         tracking_company: detectCarrier(trackingUrl),
         email_sent: true
       }
