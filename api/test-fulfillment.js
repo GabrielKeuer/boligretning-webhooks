@@ -76,27 +76,38 @@ export default async function handler(req, res) {
     
     // STEP 2: Håndter multiple tracking numre
     const trackingNumbers = trackingNumber.split(',').map(num => num.trim());
-    const trackingUrls = [];
-    
     console.log(`📦 Håndterer ${trackingNumbers.length} tracking numre`);
     
-    // Generer separate URLs for hvert tracking nummer
-    trackingNumbers.forEach(num => {
-      if (trackingUrl.includes('query=')) {
-        // For DPD og lignende med query parameter
-        trackingUrls.push(trackingUrl.replace(/query=.*/, `query=${num}`));
-      } else if (trackingUrl.includes('match=')) {
-        // For GLS med match parameter
-        trackingUrls.push(trackingUrl.replace(/match=.*/, `match=${num}`));
+    // STEP 3: Byg tracking info array - ÉN ENTRY PER TRACKING NUMMER
+    const trackingInfoArray = trackingNumbers.map(num => {
+      let individualUrl = '';
+      
+      // Byg URL baseret på carrier
+      if (carrier === 'DPD' || carrier === 'DPD_DE') {
+        individualUrl = `https://tracking.dpd.de/parcelstatus?query=${num}`;
+      } else if (carrier === 'GLS') {
+        individualUrl = `https://gls-group.eu/EU/en/parcel-tracking?match=${num}`;
+      } else if (carrier === 'PostNord') {
+        individualUrl = `https://www.postnord.dk/en/track-and-trace?id=${num}`;
+      } else if (carrier === 'DAO') {
+        individualUrl = `https://www.dao.as/tracking?code=${num}`;
+      } else if (carrier === 'Bring') {
+        individualUrl = `https://tracking.bring.com/tracking.html?q=${num}`;
       } else {
-        // For andre typer URLs - tilføj tracking nummer til sidst
-        trackingUrls.push(`${trackingUrl}${num}`);
+        // Fallback - brug basis URL
+        individualUrl = `${trackingUrl}${num}`;
       }
+      
+      console.log(`   📌 Tracking ${num} → ${individualUrl}`);
+      
+      return {
+        number: num,
+        url: individualUrl,
+        company: detectCarrier(individualUrl) || carrier
+      };
     });
     
-    console.log('🔗 Genererede tracking URLs:', trackingUrls);
-    
-    // STEP 3: Opret fulfillment med nye API format
+    // STEP 4: Opret fulfillment
     const fulfillmentData = {
       fulfillment: {
         line_items_by_fulfillment_order: [
@@ -108,16 +119,12 @@ export default async function handler(req, res) {
             }))
           }
         ],
-        tracking_info: {
-          number: trackingNumbers.join(', '), // Viser: "01475240430954, 01475240430955"
-          urls: trackingUrls, // Array med separate URLs for hvert nummer
-          company: detectCarrier(trackingUrl)
-        },
+        tracking_info: trackingInfoArray, // Array af tracking objekter
         notify_customer: true
       }
     };
     
-    console.log('📤 Opretter fulfillment...');
+    console.log('📤 Opretter fulfillment med data:', JSON.stringify(fulfillmentData, null, 2));
     
     const fulfillmentResponse = await fetch(
       `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/fulfillments.json`,
@@ -135,6 +142,7 @@ export default async function handler(req, res) {
     console.log('Fulfillment response status:', fulfillmentResponse.status);
     
     if (!fulfillmentResponse.ok) {
+      console.error('Fulfillment error response:', fulfillmentResponseText);
       throw new Error(`Fulfillment error ${fulfillmentResponse.status}: ${fulfillmentResponseText}`);
     }
     
@@ -151,9 +159,7 @@ export default async function handler(req, res) {
       },
       fulfillment: {
         id: result.fulfillment?.id,
-        tracking_numbers: trackingNumbers,
-        tracking_urls: trackingUrls,
-        tracking_company: detectCarrier(trackingUrl),
+        tracking_info: trackingInfoArray,
         email_sent: true
       }
     });
