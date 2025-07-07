@@ -74,39 +74,11 @@ export default async function handler(req, res) {
       location: fulfillmentOrder.assigned_location?.name
     });
     
-    // STEP 2: Håndter tracking fra VidaXL format
+    // STEP 2: Håndter tracking numre
     const trackingNumbers = trackingNumber.split(',').map(num => num.trim());
-    const trackingUrls = [];
-    
     console.log(`📦 Håndterer ${trackingNumbers.length} tracking numre`);
     
-    // Hvis der er flere tracking numre, lav separate URLs
-    if (trackingNumbers.length > 1) {
-      // For DPD og andre hvor URL har kombinerede numre
-      trackingNumbers.forEach(num => {
-        let individualUrl = trackingUrl;
-        
-        // Håndter forskellige URL formater
-        if (trackingUrl.includes('query=')) {
-          // DPD format: erstatter combined query med enkelt nummer
-          individualUrl = trackingUrl.replace(/query=[\d,]+/, `query=${num}`);
-        } else if (trackingUrl.includes('match=')) {
-          // GLS format (hvis de nogensinde sender multiple)
-          individualUrl = trackingUrl.replace(/match=[\w,]+/, `match=${num}`);
-        }
-        
-        trackingUrls.push(individualUrl);
-        console.log(`   📌 ${num} → ${individualUrl}`);
-      });
-    } else {
-      // Enkelt tracking nummer - brug URL som den er
-      trackingUrls.push(trackingUrl);
-      console.log(`   📌 ${trackingNumbers[0]} → ${trackingUrl}`);
-    }
-    
-    console.log('🔗 Genererede tracking URLs:', trackingUrls);
-    
-    // STEP 3: Opret fulfillment - MATCHER EMAIL TEMPLATE FORMAT
+    // STEP 3: Opret fulfillment - SIMPELT FORMAT
     const fulfillmentData = {
       fulfillment: {
         line_items_by_fulfillment_order: [
@@ -118,9 +90,11 @@ export default async function handler(req, res) {
             }))
           }
         ],
-        tracking_numbers: trackingNumbers,    // Array: ["01475240430954", "01475240430955"]
-        tracking_urls: trackingUrls,          // Array med separate URLs
-        tracking_company: carrier,            // "DPD_DE"
+        tracking_info: {
+          number: trackingNumbers.join(', '),     // "01475240430954, 01475240430955"
+          url: trackingUrl,                       // Original URL fra VidaXL
+          company: carrier
+        },
         notify_customer: true
       }
     };
@@ -160,8 +134,8 @@ export default async function handler(req, res) {
       },
       fulfillment: {
         id: result.fulfillment?.id,
-        tracking_numbers: trackingNumbers,
-        tracking_urls: trackingUrls,
+        tracking_number: trackingNumbers.join(', '),
+        tracking_url: trackingUrl,
         tracking_company: carrier,
         email_sent: true
       }
