@@ -1,5 +1,5 @@
 {
-  "crons_disabled": [{
+  "crons": [{
     "path": "/api/vidaxl-sync-tracking",
     "schedule": "0 9,13,17 * * *"
   }]
