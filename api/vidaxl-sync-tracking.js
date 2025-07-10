@@ -54,6 +54,24 @@ export default async function handler(req, res) {
         
         console.log(`   ✅ Fandt Shopify ordre: ${shopifyOrder.name} (ID: ${shopifyOrder.id})`);
         
+        // SIKKERHEDSTJEK: Verificer at vi fandt den RIGTIGE ordre
+        if (order.customer_order_reference.startsWith('#')) {
+          if (shopifyOrder.name !== order.customer_order_reference) {
+            console.error(`   🚨 ORDRE MISMATCH DETECTED!`);
+            console.error(`      VidaXL reference: ${order.customer_order_reference}`);
+            console.error(`      Shopify ordre fundet: ${shopifyOrder.name}`);
+            console.error(`      STOPPER PROCESSING AF DENNE ORDRE!`);
+            
+            results.errors.push({
+              vidaxl_order: order.order_number,
+              reference: order.customer_order_reference,
+              error: `Ordre mismatch: VidaXL=${order.customer_order_reference}, Shopify=${shopifyOrder.name}`,
+              CRITICAL: true
+            });
+            continue; // Skip denne ordre helt
+          }
+        }
+        
         // Check om allerede fulfilled
         if (shopifyOrder.fulfillment_status === 'fulfilled') {
           console.log(`   ⏭️  Ordre allerede fulfilled`);
@@ -156,15 +174,17 @@ async function fetchVidaXLOrders() {
   return vidaxlOrders;
 }
 
-// Find Shopify ordre baseret på reference - KOPI FRA TEST-FULFILLMENT-GRAPHQL.JS
+// Find Shopify ordre baseret på reference - MED EXACT MATCH FIX
 async function findShopifyOrder(orderReference) {
   try {
+    // Check om det er et ordre nummer (starter med #36)
     if (orderReference.startsWith('#36') || orderReference.startsWith('36')) {
       const orderName = orderReference.startsWith('#') ? orderReference : `#${orderReference}`;
       console.log(`🔍 Søger efter ordre nummer: ${orderName}`);
       
+      // Shopify's search API kan returnere multiple matches
       const searchResponse = await fetch(
-        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders.json?name=${orderName}&status=any`,
+        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders.json?name=${encodeURIComponent(orderName)}&status=any&limit=250`,
         {
           headers: {
             'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
@@ -174,12 +194,37 @@ async function findShopifyOrder(orderReference) {
       );
       
       const searchData = await searchResponse.json();
-      if (searchData.orders?.[0]) {
-        console.log(`✅ Fandt ordre via nummer: ${orderName}`);
-        return searchData.orders[0];
+      
+      if (searchData.orders && searchData.orders.length > 0) {
+        console.log(`   Shopify returnerede ${searchData.orders.length} ordre(r)`);
+        
+        // KRITISK: Find EXACT match - ikke bare den første!
+        const exactMatch = searchData.orders.find(order => 
+          order.name.toLowerCase() === orderName.toLowerCase()
+        );
+        
+        if (exactMatch) {
+          console.log(`✅ Fandt EXACT match: ${exactMatch.name} (ID: ${exactMatch.id})`);
+          return exactMatch;
+        } else {
+          // Log alle returnerede ordrer for debugging
+          console.log(`❌ INGEN EXACT MATCH for ${orderName}!`);
+          console.log(`   Shopify returnerede disse ordre:`, 
+            searchData.orders.map(o => ({
+              name: o.name,
+              id: o.id,
+              created_at: o.created_at
+            }))
+          );
+          return null;
+        }
+      } else {
+        console.log(`   Ingen ordrer fundet for ${orderName}`);
+        return null;
       }
+      
     } else {
-      // Det er et ordre ID - hent direkte
+      // Det er et ordre ID - hent direkte (dette virker fint)
       console.log(`🔍 Henter ordre via ID: ${orderReference}`);
       
       const response = await fetch(
@@ -196,14 +241,14 @@ async function findShopifyOrder(orderReference) {
         const data = await response.json();
         console.log(`✅ Fandt ordre via ID: ${orderReference}`);
         return data.order;
+      } else {
+        console.log(`❌ Ordre med ID ${orderReference} ikke fundet`);
+        return null;
       }
     }
     
-    console.log(`❌ Ordre ikke fundet: ${orderReference}`);
-    return null;
-    
   } catch (error) {
-    console.error('Shopify søgefejl:', error);
+    console.error('❌ Shopify søgefejl:', error);
     return null;
   }
 }
@@ -465,15 +510,24 @@ async function sendSyncReport(results) {
           <th>VidaXL Ordre</th>
           <th>Reference</th>
           <th>Fejl</th>
+          <th>Kritisk</th>
         </tr>
         ${results.errors.map(err => `
-          <tr>
+          <tr style="${err.CRITICAL ? 'background-color: #ffcccc;' : ''}">
             <td>${err.vidaxl_order}</td>
             <td>${err.reference}</td>
             <td>${err.error}</td>
+            <td>${err.CRITICAL ? '⚠️ JA' : 'Nej'}</td>
           </tr>
         `).join('')}
       </table>
+    ` : ''}
+    
+    ${results.errors.some(e => e.CRITICAL) ? `
+      <p style="color: red; font-weight: bold;">
+        ⚠️ ADVARSEL: Der er kritiske fejl med ordre mismatch! 
+        Check logs øjeblikkeligt.
+      </p>
     ` : ''}
   `;
   
@@ -487,7 +541,7 @@ async function sendSyncReport(results) {
       body: JSON.stringify({
         from: 'BoligRetning <onboarding@resend.dev>',
         to: 'kontakt@boligretning.dk',
-        subject: `Tracking Sync: ${results.fulfilled} ordrer opdateret`,
+        subject: `Tracking Sync: ${results.fulfilled} ordrer opdateret${results.errors.some(e => e.CRITICAL) ? ' ⚠️ KRITISK FEJL' : ''}`,
         html: emailHtml
       })
     });
