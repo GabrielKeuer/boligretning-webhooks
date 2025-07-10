@@ -165,11 +165,10 @@ async function fetchVidaXLOrders() {
   
   let vidaxlOrders = await response.json();
   
-  // I test mode - max 5 ordrer
-  if (process.env.TEST_MODE === 'true' && vidaxlOrders.length > 5) {
-    console.log(`⚠️ TEST MODE: Kun checker 5 ordrer (ud af ${vidaxlOrders.length})`);
-    vidaxlOrders = vidaxlOrders.slice(0, 5);
-  }
+ // Test mode - vis alle ordrer
+if (process.env.TEST_MODE === 'true') {
+  console.log(`⚠️ TEST MODE: Checker alle ${vidaxlOrders.length} ordrer`);
+}
   
   return vidaxlOrders;
 }
