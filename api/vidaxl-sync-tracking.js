@@ -10,7 +10,7 @@ export default async function handler(req, res) {
   console.log(`🔄 VidaXL Tracking Sync Started (${TEST_MODE ? 'TEST MODE' : 'LIVE MODE'})`);
   
   try {
-    // STEP 1: Hent ordrer fra VidaXL (sidste 7 dage)
+    // STEP 1: Hent ordrer fra VidaXL (sidste 7 dage))
     const ordersFromVidaXL = await fetchVidaXLOrders();
     console.log(`📦 Fandt ${ordersFromVidaXL.length} ordrer i VidaXL`);
     
