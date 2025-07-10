@@ -1,6 +1,16 @@
 {
-  "crons": [{
-    "path": "/api/vidaxl-sync-tracking",
-    "schedule": "0 9,13,17 * * *"
-  }]
+  "crons": [
+    {
+      "path": "/api/vidaxl-sync-tracking",
+      "schedule": "0 10,14,18 * * *"
+    }
+  ],
+  "functions": {
+    "api/vidaxl-webhook.js": {
+      "maxDuration": 60
+    },
+    "api/vidaxl-sync-tracking.js": {
+      "maxDuration": 60
+    }
+  }
 }
