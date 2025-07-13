@@ -7,32 +7,82 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   
-  const { orderId } = req.body;
+  const { orderId, orderNumber } = req.body;
   
-  if (!orderId) {
-    return res.status(400).json({ error: 'Order ID required' });
+  if (!orderId && !orderNumber) {
+    return res.status(400).json({ error: 'Order ID or order number required' });
   }
   
-  console.log(`🔄 Manual retry for ordre: ${orderId}`);
+  console.log(`🔄 Manual retry for ordre: ${orderId || orderNumber}`);
+  
+  let order; // Flyttet uden for try block
   
   try {
-    // Hent ordre fra Shopify
-    const orderResponse = await fetch(
-      `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${orderId}.json`,
-      {
-        headers: {
-          'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
-          'Content-Type': 'application/json'
+    // Hvis ordre nummer (f.eks. #362673)
+    if (orderNumber) {
+      const searchResponse = await fetch(
+        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders.json?name=${encodeURIComponent(orderNumber)}&status=any`,
+        {
+          headers: {
+            'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
+            'Content-Type': 'application/json'
+          }
         }
+      );
+      
+      const searchData = await searchResponse.json();
+      if (!searchData.orders || searchData.orders.length === 0) {
+        throw new Error('Ordre ikke fundet');
       }
-    );
-    
-    if (!orderResponse.ok) {
-      throw new Error('Ordre ikke fundet');
+      
+      // Find exact match
+      order = searchData.orders.find(o => o.name === orderNumber);
+      if (!order) {
+        throw new Error(`Ingen exact match for ${orderNumber}`);
+      }
+    } 
+    // Hvis ordre ID
+    else {
+      const orderResponse = await fetch(
+        `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders/${orderId}.json`,
+        {
+          headers: {
+            'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      if (!orderResponse.ok) {
+        throw new Error('Ordre ikke fundet med ID');
+      }
+      
+      const data = await orderResponse.json();
+      order = data.order;
     }
     
-    const { order } = await orderResponse.json();
     console.log(`📦 Fandt ordre: ${order.name}`);
+    
+    // Filtrer kun aktive line items (ikke refunderede/cancelled)
+    const activeLineItems = order.line_items.filter(item => {
+      // Skip hvis refunderet eller cancelled
+      if (item.fulfillable_quantity === 0 && item.quantity > 0) {
+        console.log(`⏭️ Springer over refunderet produkt: ${item.sku} - ${item.name}`);
+        return false;
+      }
+      // Skip hvis ingen SKU
+      if (!item.sku) {
+        console.log(`⏭️ Springer over produkt uden SKU: ${item.name}`);
+        return false;
+      }
+      return true;
+    });
+    
+    if (activeLineItems.length === 0) {
+      throw new Error('Ingen aktive produkter at sende til VidaXL');
+    }
+    
+    console.log(`📦 Sender ${activeLineItems.length} aktive produkter (ud af ${order.line_items.length} total)`);
     
     // Send til VidaXL (samme logik som webhook)
     const vidaxlOrder = {
@@ -40,7 +90,7 @@ export default async function handler(req, res) {
       addressbook: {
         country: order.shipping_address.country_code
       },
-      order_products: order.line_items.map(item => ({
+      order_products: activeLineItems.map(item => ({
         product_code: item.sku,
         quantity: item.quantity,
         addressbook: {
@@ -79,18 +129,29 @@ export default async function handler(req, res) {
     return res.json({
       success: true,
       shopify_order: order.name,
-      vidaxl_order_id: result.order?.id
+      vidaxl_order_id: result.order?.id,
+      products_sent: activeLineItems.length,
+      products_skipped: order.line_items.length - activeLineItems.length
     });
     
   } catch (error) {
     console.error('❌ Retry fejl:', error);
     
-    // Send fejl email
-    if (order) {
+    // Send fejl email hvis vi har ordre info
+    if (typeof order !== 'undefined' && order) {
       await sendErrorEmail(order, {
         error: error.message,
         timestamp: new Date().toISOString(),
         retry_attempt: true
+      });
+    }
+    
+    // Special handling for product not active
+    if (error.message && error.message.includes('Product is not active')) {
+      return res.status(400).json({
+        success: false,
+        error: 'Et eller flere produkter er ikke aktive hos VidaXL',
+        details: error.message
       });
     }
     
