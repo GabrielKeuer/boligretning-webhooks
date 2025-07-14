@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/vidaxl-sync-tracking.js": {
+      "maxDuration": 60
+    }
+  },
   "crons": [
     {
       "path": "/api/vidaxl-sync-tracking",
