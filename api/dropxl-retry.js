@@ -1,5 +1,8 @@
 // api/dropxl-retry.js
-// Manuel endpoint til at gensende ordre til DropXL (tidligere VidaXL)
+// Manuel endpoint til at gensende ordre til DropXL (VidaXL, Bestway, Keter)
+
+// Tilladt vendor liste - DropXL håndterer disse brands
+const DROPXL_VENDORS = ['VidaXL', 'vidaxl', 'Bestway', 'bestway', 'Keter', 'keter'];
 
 export default async function handler(req, res) {
   // Check auth
@@ -63,8 +66,20 @@ export default async function handler(req, res) {
     
     console.log(`📦 Fandt ordre: ${order.name}`);
     
-    // Filtrer kun aktive line items (ikke refunderede/cancelled)
-    const activeLineItems = order.line_items.filter(item => {
+    // STEP 1: Filtrer kun DropXL vendor produkter
+    const dropxlProducts = order.line_items.filter(item => {
+      // Check vendor først
+      if (!item.vendor || !DROPXL_VENDORS.includes(item.vendor)) {
+        console.log(`⏭️ Springer over non-DropXL produkt: ${item.sku} - ${item.name} (Vendor: ${item.vendor || 'Ingen'})`);
+        return false;
+      }
+      return true;
+    });
+    
+    console.log(`📊 Vendor filtering: ${dropxlProducts.length} DropXL produkter ud af ${order.line_items.length} total`);
+    
+    // STEP 2: Filtrer kun aktive DropXL produkter (ikke refunderede/cancelled)
+    const activeLineItems = dropxlProducts.filter(item => {
       // Skip hvis refunderet eller cancelled
       if (item.fulfillable_quantity === 0 && item.quantity > 0) {
         console.log(`⏭️ Springer over refunderet produkt: ${item.sku} - ${item.name}`);
@@ -79,12 +94,18 @@ export default async function handler(req, res) {
     });
     
     if (activeLineItems.length === 0) {
-      throw new Error('Ingen aktive produkter at sende til DropXL');
+      // Tjek om det er fordi der ingen DropXL produkter var
+      if (dropxlProducts.length === 0) {
+        throw new Error('Ingen DropXL produkter i denne ordre (kun VidaXL, Bestway og Keter sendes til DropXL)');
+      } else {
+        throw new Error('Ingen aktive DropXL produkter at sende (alle er refunderet eller mangler SKU)');
+      }
     }
     
-    console.log(`📦 Sender ${activeLineItems.length} aktive produkter (ud af ${order.line_items.length} total)`);
+    console.log(`📦 Sender ${activeLineItems.length} aktive DropXL produkter`);
+    console.log(`✅ Inkluderede vendors:`, [...new Set(activeLineItems.map(item => item.vendor))]);
     
-    // OPDATERET: Send til DropXL med nyt API endpoint
+    // Send til DropXL med nyt API endpoint
     // Fallback telefonnummer - brug kundens nummer eller firmanummer som backup
     const fallbackPhone = order.shipping_address.phone || order.phone || process.env.COMPANY_PHONE || '70701870';
     
@@ -111,7 +132,7 @@ export default async function handler(req, res) {
       }))
     };
     
-    // OPDATERET: Ny DropXL endpoint og autentificering
+    // Ny DropXL endpoint og autentificering
     const dropxlResponse = await fetch('https://b2b.dropxl.com/api_customer/orders', {
       method: 'POST',
       headers: {
@@ -130,12 +151,19 @@ export default async function handler(req, res) {
     // Success!
     console.log(`✅ Ordre sendt til DropXL! ID: ${result.order?.id}`);
     
+    // Beregn hvad der blev sprunget over
+    const skippedNonDropXL = order.line_items.length - dropxlProducts.length;
+    const skippedInactive = dropxlProducts.length - activeLineItems.length;
+    
     return res.json({
       success: true,
       shopify_order: order.name,
       dropxl_order_id: result.order?.id,
       products_sent: activeLineItems.length,
-      products_skipped: order.line_items.length - activeLineItems.length
+      products_skipped_vendor: skippedNonDropXL,
+      products_skipped_inactive: skippedInactive,
+      products_total: order.line_items.length,
+      vendors_included: [...new Set(activeLineItems.map(item => item.vendor))]
     });
     
   } catch (error) {
