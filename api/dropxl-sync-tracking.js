@@ -1,4 +1,8 @@
 // api/dropxl-sync-tracking.js
+
+// Tilladt vendor liste - DropXL håndterer disse brands
+const DROPXL_VENDORS = ['vidaXL', 'VidaXL', 'vidaxl', 'Bestway', 'bestway', 'Keter', 'keter'];
+
 export default async function handler(req, res) {
   // Kun tillad med korrekt CRON_SECRET
   if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -7,23 +11,24 @@ export default async function handler(req, res) {
   
   const TEST_MODE = process.env.TEST_MODE === 'true';
   
-  console.log(`🔄 DropXL Tracking Sync Started (${TEST_MODE ? 'TEST MODE' : 'LIVE MODE'})`);  // ÆNDRET: VidaXL → DropXL
+  console.log(`🔄 DropXL Tracking Sync Started (${TEST_MODE ? 'TEST MODE' : 'LIVE MODE'})`);
   
   try {
     // STEP 1: Hent ordrer fra DropXL (sidste 7 dage)
-    const ordersFromDropXL = await fetchDropXLOrders();  // ÆNDRET: Funktion navn
-    console.log(`📦 Fandt ${ordersFromDropXL.length} ordrer i DropXL`);  // ÆNDRET: VidaXL → DropXL
+    const ordersFromDropXL = await fetchDropXLOrders();
+    console.log(`📦 Fandt ${ordersFromDropXL.length} ordrer i DropXL`);
     
     const results = {
       processed: 0,
       fulfilled: 0,
+      partialFulfilled: 0,
       skipped: 0,
       errors: []
     };
     
     // STEP 2: Process hver ordre
     for (const item of ordersFromDropXL) {
-      const order = item.order; // DropXL struktur (samme som VidaXL)
+      const order = item.order; // DropXL struktur
       
       try {
         // Skip ordrer uden tracking eller ikke sendt
@@ -33,11 +38,22 @@ export default async function handler(req, res) {
           continue;
         }
         
-        console.log(`\n📋 Processing DropXL ordre:`);  // ÆNDRET: VidaXL → DropXL
+        console.log(`\n📋 Processing DropXL ordre:`);
         console.log(`   Reference: ${order.customer_order_reference}`);
         console.log(`   Tracking: ${order.shipping_tracking}`);
         console.log(`   URL: ${order.shipping_tracking_url || 'Ingen URL'}`);
         console.log(`   Carrier: ${order.shipping_option_name || 'Ukendt'}`);
+        
+        // VIGTIGT: Hent SKUs fra DropXL ordre produkter
+        const dropxlSKUs = [];
+        if (order.order_products && Array.isArray(order.order_products)) {
+          order.order_products.forEach(product => {
+            if (product.order_product) {
+              dropxlSKUs.push(product.order_product.product_code);
+            }
+          });
+        }
+        console.log(`   📦 DropXL SKUs i ordre:`, dropxlSKUs);
         
         // Find Shopify ordre
         const shopifyOrder = await findShopifyOrder(order.customer_order_reference);
@@ -45,7 +61,7 @@ export default async function handler(req, res) {
         if (!shopifyOrder) {
           console.log(`   ❌ Shopify ordre ikke fundet`);
           results.errors.push({
-            dropxl_order: order.id,  // ÆNDRET: vidaxl_order → dropxl_order (bruger også order.id som i DropXL response)
+            dropxl_order: order.id,
             reference: order.customer_order_reference,
             error: 'Shopify ordre ikke fundet'
           });
@@ -58,17 +74,17 @@ export default async function handler(req, res) {
         if (order.customer_order_reference.startsWith('#')) {
           if (shopifyOrder.name !== order.customer_order_reference) {
             console.error(`   🚨 ORDRE MISMATCH DETECTED!`);
-            console.error(`      DropXL reference: ${order.customer_order_reference}`);  // ÆNDRET: VidaXL → DropXL
+            console.error(`      DropXL reference: ${order.customer_order_reference}`);
             console.error(`      Shopify ordre fundet: ${shopifyOrder.name}`);
             console.error(`      STOPPER PROCESSING AF DENNE ORDRE!`);
             
             results.errors.push({
-              dropxl_order: order.id,  // ÆNDRET: vidaxl_order → dropxl_order
+              dropxl_order: order.id,
               reference: order.customer_order_reference,
-              error: `Ordre mismatch: DropXL=${order.customer_order_reference}, Shopify=${shopifyOrder.name}`,  // ÆNDRET
+              error: `Ordre mismatch: DropXL=${order.customer_order_reference}, Shopify=${shopifyOrder.name}`,
               CRITICAL: true
             });
-            continue; // Skip denne ordre helt
+            continue;
           }
         }
         
@@ -79,10 +95,20 @@ export default async function handler(req, res) {
           continue;
         }
         
-        // Opret fulfillment med GraphQL
+        // PARTIAL FULFILLMENT CHECK: Identificer hvilke produkter der skal fulfilles
+        const isPartialOrder = checkIfPartialOrder(shopifyOrder, dropxlSKUs);
+        
+        if (isPartialOrder) {
+          console.log(`   📊 PARTIAL FULFILLMENT PÅKRÆVET!`);
+          console.log(`      Total produkter i Shopify: ${shopifyOrder.line_items.length}`);
+          console.log(`      DropXL produkter: ${dropxlSKUs.length}`);
+        }
+        
+        // Opret fulfillment med GraphQL (nu med partial support)
         if (!TEST_MODE) {
-          const fulfillmentResult = await createGraphQLFulfillment(
+          const fulfillmentResult = await createPartialGraphQLFulfillment(
             shopifyOrder,
+            dropxlSKUs,  // Send SKUs så vi kan matche
             order.shipping_tracking,
             order.shipping_tracking_url,
             order.shipping_option_name || detectCarrier(order.shipping_tracking_url)
@@ -90,16 +116,25 @@ export default async function handler(req, res) {
           
           if (fulfillmentResult.success) {
             console.log(`   ✅ Fulfillment oprettet med ID: ${fulfillmentResult.fulfillmentId}`);
-            results.fulfilled++;
+            if (fulfillmentResult.isPartial) {
+              console.log(`   📦 Partial fulfillment: ${fulfillmentResult.itemsFulfilled} af ${fulfillmentResult.itemsTotal} produkter`);
+              results.partialFulfilled++;
+            } else {
+              results.fulfilled++;
+            }
           } else {
             throw new Error(fulfillmentResult.error);
           }
         } else {
-          console.log(`   🧪 TEST MODE: Ville oprette fulfillment`);
+          console.log(`   🧪 TEST MODE: Ville oprette ${isPartialOrder ? 'PARTIAL' : 'FULL'} fulfillment`);
           console.log(`      Tracking: ${order.shipping_tracking}`);
           console.log(`      URL: ${order.shipping_tracking_url || 'Ingen'}`);
-          console.log(`      Multiple URLs:`, order.shipping_tracking_urls_by_number);
-          results.fulfilled++;
+          console.log(`      DropXL SKUs:`, dropxlSKUs);
+          if (isPartialOrder) {
+            results.partialFulfilled++;
+          } else {
+            results.fulfilled++;
+          }
         }
         
         results.processed++;
@@ -107,7 +142,7 @@ export default async function handler(req, res) {
       } catch (orderError) {
         console.error(`   ❌ Fejl for ordre ${order.customer_order_reference}:`, orderError.message);
         results.errors.push({
-          dropxl_order: order.id || 'Ukendt',  // ÆNDRET: vidaxl_order → dropxl_order
+          dropxl_order: order.id || 'Ukendt',
           reference: order.customer_order_reference,
           error: orderError.message
         });
@@ -115,7 +150,7 @@ export default async function handler(req, res) {
     }
     
     // STEP 3: Send rapport email hvis der er opdateringer eller fejl
-    if (results.fulfilled > 0 || results.errors.length > 0) {
+    if (results.fulfilled > 0 || results.partialFulfilled > 0 || results.errors.length > 0) {
       await sendSyncReport(results);
     }
     
@@ -123,7 +158,7 @@ export default async function handler(req, res) {
     
     return res.json({
       success: true,
-      message: 'DropXL tracking sync completed',  // ÆNDRET: VidaXL → DropXL
+      message: 'DropXL tracking sync completed',
       results
     });
     
@@ -131,7 +166,7 @@ export default async function handler(req, res) {
     console.error('❌ Sync fejl:', error);
     
     // Send fejl email
-    await sendErrorEmail('DropXL Sync Fejl', error.message);  // ÆNDRET: VidaXL → DropXL
+    await sendErrorEmail('DropXL Sync Fejl', error.message);
     
     return res.status(500).json({ 
       error: error.message,
@@ -140,8 +175,24 @@ export default async function handler(req, res) {
   }
 }
 
-// Hent ordrer fra DropXL API - OPDATERET ENDPOINT OG AUTH
-async function fetchDropXLOrders() {  // ÆNDRET: Funktion navn
+// Check om ordre skal have partial fulfillment
+function checkIfPartialOrder(shopifyOrder, dropxlSKUs) {
+  // Hvis DropXL ikke har alle SKUs fra Shopify ordren, er det partial
+  const shopifySKUs = shopifyOrder.line_items.map(item => item.sku).filter(sku => sku);
+  
+  // Check om alle Shopify SKUs er i DropXL listen
+  const missingInDropXL = shopifySKUs.filter(sku => !dropxlSKUs.includes(sku));
+  
+  if (missingInDropXL.length > 0) {
+    console.log(`   📝 Følgende SKUs er IKKE hos DropXL:`, missingInDropXL);
+    return true;
+  }
+  
+  return false;
+}
+
+// Hent ordrer fra DropXL API
+async function fetchDropXLOrders() {
   // Hent ordrer fra sidste 7 dage
   const daysBack = process.env.TEST_MODE === 'true' ? 1 : 7;
   const dateLimit = new Date();
@@ -150,23 +201,21 @@ async function fetchDropXLOrders() {  // ÆNDRET: Funktion navn
   
   console.log(`📅 Henter ordrer fra: ${dateString}`);
   
-  // ÆNDRET: Ny DropXL endpoint og authentication
   const response = await fetch(
-    `https://b2b.dropxl.com/api_customer/orders?submitted_at_gteq=${dateString}`,  // ÆNDRET: URL
+    `https://b2b.dropxl.com/api_customer/orders?submitted_at_gteq=${dateString}`,
     {
       headers: {
-        'Authorization': 'Basic ' + Buffer.from(`${process.env.DROPXL_EMAIL}:${process.env.DROPXL_API_TOKEN}`).toString('base64')  // ÆNDRET: Environment variables
+        'Authorization': 'Basic ' + Buffer.from(`${process.env.DROPXL_EMAIL}:${process.env.DROPXL_API_TOKEN}`).toString('base64')
       }
     }
   );
   
   if (!response.ok) {
-    throw new Error(`DropXL API error: ${response.status}`);  // ÆNDRET: VidaXL → DropXL
+    throw new Error(`DropXL API error: ${response.status}`);
   }
   
-  let dropxlOrders = await response.json();  // ÆNDRET: Variabel navn
+  let dropxlOrders = await response.json();
   
-  // Test mode - vis alle ordrer
   if (process.env.TEST_MODE === 'true') {
     console.log(`⚠️ TEST MODE: Checker alle ${dropxlOrders.length} ordrer`);
   }
@@ -174,15 +223,13 @@ async function fetchDropXLOrders() {  // ÆNDRET: Funktion navn
   return dropxlOrders;
 }
 
-// Find Shopify ordre baseret på reference - MED EXACT MATCH FIX
+// Find Shopify ordre baseret på reference
 async function findShopifyOrder(orderReference) {
   try {
-    // Check om det er et ordre nummer (starter med #36)
     if (orderReference.startsWith('#36') || orderReference.startsWith('36')) {
       const orderName = orderReference.startsWith('#') ? orderReference : `#${orderReference}`;
       console.log(`🔍 Søger efter ordre nummer: ${orderName}`);
       
-      // Shopify's search API kan returnere multiple matches
       const searchResponse = await fetch(
         `https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/orders.json?name=${encodeURIComponent(orderName)}&status=any&limit=250`,
         {
@@ -198,7 +245,6 @@ async function findShopifyOrder(orderReference) {
       if (searchData.orders && searchData.orders.length > 0) {
         console.log(`   Shopify returnerede ${searchData.orders.length} ordre(r)`);
         
-        // KRITISK: Find EXACT match - ikke bare den første!
         const exactMatch = searchData.orders.find(order => 
           order.name.toLowerCase() === orderName.toLowerCase()
         );
@@ -207,15 +253,7 @@ async function findShopifyOrder(orderReference) {
           console.log(`✅ Fandt EXACT match: ${exactMatch.name} (ID: ${exactMatch.id})`);
           return exactMatch;
         } else {
-          // Log alle returnerede ordrer for debugging
           console.log(`❌ INGEN EXACT MATCH for ${orderName}!`);
-          console.log(`   Shopify returnerede disse ordre:`, 
-            searchData.orders.map(o => ({
-              name: o.name,
-              id: o.id,
-              created_at: o.created_at
-            }))
-          );
           return null;
         }
       } else {
@@ -224,7 +262,6 @@ async function findShopifyOrder(orderReference) {
       }
       
     } else {
-      // Det er et ordre ID - hent direkte (dette virker fint)
       console.log(`🔍 Henter ordre via ID: ${orderReference}`);
       
       const response = await fetch(
@@ -253,13 +290,23 @@ async function findShopifyOrder(orderReference) {
   }
 }
 
-// Opret fulfillment med GraphQL - EXACT KOPI FRA TEST-FULFILLMENT-GRAPHQL.JS
-async function createGraphQLFulfillment(order, trackingNumber, trackingUrl, carrier) {
+// OPDATERET: Opret partial fulfillment med GraphQL
+async function createPartialGraphQLFulfillment(order, dropxlSKUs, trackingNumber, trackingUrl, carrier) {
   try {
     // STEP 1: Hent fulfillment orders via GraphQL
     const fulfillmentOrdersQuery = `
       query getFulfillmentOrders($orderId: ID!) {
         order(id: $orderId) {
+          lineItems(first: 50) {
+            edges {
+              node {
+                id
+                sku
+                vendor
+                name
+              }
+            }
+          }
           fulfillmentOrders(first: 10) {
             edges {
               node {
@@ -272,6 +319,8 @@ async function createGraphQLFulfillment(order, trackingNumber, trackingUrl, carr
                       remainingQuantity
                       lineItem {
                         id
+                        sku
+                        vendor
                         name
                       }
                     }
@@ -288,6 +337,7 @@ async function createGraphQLFulfillment(order, trackingNumber, trackingUrl, carr
     
     const foResponse = await shopifyGraphQL(fulfillmentOrdersQuery, { orderId: gqlOrderId });
     const fulfillmentOrders = foResponse.data.order.fulfillmentOrders.edges;
+    const allLineItems = foResponse.data.order.lineItems.edges;
     
     if (!fulfillmentOrders || fulfillmentOrders.length === 0) {
       throw new Error('Ingen fulfillment orders fundet');
@@ -296,53 +346,73 @@ async function createGraphQLFulfillment(order, trackingNumber, trackingUrl, carr
     const fulfillmentOrder = fulfillmentOrders[0].node;
     console.log('🎯 Bruger fulfillment order:', fulfillmentOrder.id);
     
-    // STEP 2: Håndter multiple tracking numre med AUTO-DETECTION (KOPI FRA TEST)
+    // STEP 2: FILTRER line items baseret på DropXL SKUs OG vendor
+    const lineItemsToFulfill = [];
+    let skippedItems = [];
+    
+    fulfillmentOrder.lineItems.edges.forEach(edge => {
+      const lineItem = edge.node;
+      const sku = lineItem.lineItem.sku;
+      const vendor = lineItem.lineItem.vendor;
+      const name = lineItem.lineItem.name;
+      
+      // Check om SKU er i DropXL listen OG vendor er korrekt
+      if (dropxlSKUs.includes(sku) && DROPXL_VENDORS.includes(vendor)) {
+        if (lineItem.remainingQuantity > 0) {
+          lineItemsToFulfill.push({
+            id: lineItem.id,
+            quantity: lineItem.remainingQuantity
+          });
+          console.log(`   ✅ Inkluderer: ${sku} - ${name} (Qty: ${lineItem.remainingQuantity})`);
+        }
+      } else {
+        skippedItems.push(`${sku} - ${name} (Vendor: ${vendor || 'Ingen'})`);
+        console.log(`   ⏭️ Springer over: ${sku} - ${name} (Vendor: ${vendor || 'Ingen'})`);
+      }
+    });
+    
+    if (lineItemsToFulfill.length === 0) {
+      throw new Error('Ingen DropXL produkter at fulfill i denne ordre');
+    }
+    
+    const isPartialFulfillment = skippedItems.length > 0;
+    
+    if (isPartialFulfillment) {
+      console.log(`   📊 PARTIAL FULFILLMENT:`);
+      console.log(`      Fulfilling: ${lineItemsToFulfill.length} produkter`);
+      console.log(`      Skipping: ${skippedItems.length} produkter`);
+    }
+    
+    // STEP 3: Håndter tracking numre
     const trackingNumbers = trackingNumber.split(',').map(num => num.trim());
     const trackingDataArray = [];
     
     console.log(`📦 Håndterer ${trackingNumbers.length} tracking numre`);
     
-    // Auto-detect carrier for hvert tracking nummer
     trackingNumbers.forEach(num => {
-      let detectedCarrier = carrier; // Default carrier fra input
+      let detectedCarrier = carrier;
       let individualUrl = '';
       
-      // Auto-detect baseret på format
+      // Auto-detect carrier baseret på format
       if (num.match(/^\d{14,15}$/)) {
-        // DPD format: 14-15 cifre
         detectedCarrier = 'DPD';
         individualUrl = `https://tracking.dpd.de/parcelstatus?query=${num}`;
       } else if (num.match(/^[A-Z0-9]{8}$/)) {
-        // GLS format: 8 alfanumeriske karakterer
         detectedCarrier = 'GLS';
         individualUrl = `https://gls-group.eu/EU/en/parcel-tracking?match=${num}`;
       } else if (num.match(/^\d{18}$/)) {
-        // PostNord format: 18 cifre
         detectedCarrier = 'PostNord';
         individualUrl = `https://www.postnord.dk/en/track-and-trace?id=${num}`;
       } else if (num.match(/^7\d{13}$/)) {
-        // DAO format: starter med 7 og har 14 cifre
         detectedCarrier = 'DAO';
         individualUrl = `https://www.dao.as/tracking?code=${num}`;
       } else if (num.match(/^1Z[A-Z0-9]+$/)) {
-        // UPS format: starter med 1Z
         detectedCarrier = 'UPS';
         individualUrl = `https://www.ups.com/track?tracknum=${num}`;
       } else if (num.match(/^\d{10}$/)) {
-        // DHL format: 10 cifre
         detectedCarrier = 'DHL';
         individualUrl = `https://www.dhl.com/en/express/tracking.html?AWB=${num}`;
-      } else if (trackingUrl && trackingUrl.includes(',')) {
-        // Hvis URL har komma-separerede numre, split og match
-        if (trackingUrl.includes('query=')) {
-          individualUrl = trackingUrl.replace(/query=[\d,]+/, `query=${num}`);
-        } else if (trackingUrl.includes('match=')) {
-          individualUrl = trackingUrl.replace(/match=[\w,]+/, `match=${num}`);
-        } else {
-          individualUrl = trackingUrl;
-        }
       } else {
-        // Fallback: brug input URL
         individualUrl = trackingUrl || '';
       }
       
@@ -352,31 +422,14 @@ async function createGraphQLFulfillment(order, trackingNumber, trackingUrl, carr
         url: individualUrl
       });
       
-      console.log(`   📌 ${num} → Detected: ${detectedCarrier} → ${individualUrl}`);
+      console.log(`   📌 ${num} → Detected: ${detectedCarrier}`);
     });
     
-    // Check om alle har samme carrier
     const uniqueCarriers = [...new Set(trackingDataArray.map(t => t.carrier))];
-    
-    if (uniqueCarriers.length > 1) {
-      console.log('⚠️ ADVARSEL: Multiple carriers detected:', uniqueCarriers);
-      console.log('📝 Shopify understøtter kun én carrier per fulfillment');
-      console.log('🔄 Bruger mest almindelige carrier eller første:', trackingDataArray[0].carrier);
-    }
-    
-    // Find mest almindelige carrier eller brug første
-    const carrierCounts = {};
-    trackingDataArray.forEach(t => {
-      carrierCounts[t.carrier] = (carrierCounts[t.carrier] || 0) + 1;
-    });
-    const finalCarrier = Object.keys(carrierCounts).reduce((a, b) => 
-      carrierCounts[a] > carrierCounts[b] ? a : b
-    );
-    
-    // Ekstrahér tracking URLs
+    const finalCarrier = uniqueCarriers.length === 1 ? uniqueCarriers[0] : trackingDataArray[0].carrier;
     const trackingUrls = trackingDataArray.map(t => t.url);
     
-    // STEP 3: Opret fulfillment med GraphQL mutation
+    // STEP 4: Opret fulfillment med GraphQL mutation
     const createFulfillmentMutation = `
       mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) {
         fulfillmentCreateV2(fulfillment: $fulfillment) {
@@ -397,31 +450,24 @@ async function createGraphQLFulfillment(order, trackingNumber, trackingUrl, carr
       }
     `;
     
-    // Byg line items array
-    const lineItems = fulfillmentOrder.lineItems.edges.map(edge => ({
-      id: edge.node.id,
-      quantity: edge.node.remainingQuantity
-    }));
-    
-    // Byg fulfillment input - EXACT SAMME STRUKTUR SOM TEST
     const fulfillmentInput = {
       fulfillment: {
         lineItemsByFulfillmentOrder: [
           {
             fulfillmentOrderId: fulfillmentOrder.id,
-            fulfillmentOrderLineItems: lineItems
+            fulfillmentOrderLineItems: lineItemsToFulfill  // KUN DropXL produkter
           }
         ],
         notifyCustomer: true,
         trackingInfo: {
           company: finalCarrier,
-          numbers: trackingNumbers,  // Original array af tracking numre
-          urls: trackingUrls        // Array af genererede URLs
+          numbers: trackingNumbers,
+          urls: trackingUrls
         }
       }
     };
     
-    console.log('📤 Opretter fulfillment med GraphQL:', JSON.stringify(fulfillmentInput, null, 2));
+    console.log('📤 Opretter fulfillment med GraphQL');
     
     const result = await shopifyGraphQL(createFulfillmentMutation, fulfillmentInput);
     
@@ -434,11 +480,14 @@ async function createGraphQLFulfillment(order, trackingNumber, trackingUrl, carr
     
     return {
       success: true,
-      fulfillmentId: fulfillment.id
+      fulfillmentId: fulfillment.id,
+      isPartial: isPartialFulfillment,
+      itemsFulfilled: lineItemsToFulfill.length,
+      itemsTotal: fulfillmentOrder.lineItems.edges.length
     };
     
   } catch (error) {
-    console.error('❌ Fejl i createGraphQLFulfillment:', error.message);
+    console.error('❌ Fejl i createPartialGraphQLFulfillment:', error.message);
     return {
       success: false,
       error: error.message
@@ -489,7 +538,7 @@ function detectCarrier(trackingUrl) {
   return 'Other';
 }
 
-// Send sync rapport - OPDATERET MED DROPXL
+// Send sync rapport - OPDATERET med partial fulfillment info
 async function sendSyncReport(results) {
   const emailHtml = `
     <h2>DropXL Tracking Sync Rapport</h2>
@@ -498,10 +547,18 @@ async function sendSyncReport(results) {
     <h3>Resultater:</h3>
     <ul>
       <li>Behandlet: ${results.processed} ordrer</li>
-      <li>Fulfilled: ${results.fulfilled} ordrer</li>
+      <li>Fuldt fulfilled: ${results.fulfilled} ordrer</li>
+      <li>Delvist fulfilled: ${results.partialFulfilled} ordrer</li>
       <li>Sprunget over: ${results.skipped} ordrer</li>
       <li>Fejl: ${results.errors.length} ordrer</li>
     </ul>
+    
+    ${results.partialFulfilled > 0 ? `
+      <p style="background: #fffbf0; padding: 10px; border-left: 4px solid #ffa500;">
+        📦 <strong>Note:</strong> ${results.partialFulfilled} ordrer havde produkter fra flere leverandører. 
+        Kun DropXL produkter (vidaXL, Bestway, Keter) blev markeret som sendt.
+      </p>
+    ` : ''}
     
     ${results.errors.length > 0 ? `
       <h3>Fejl:</h3>
@@ -541,7 +598,7 @@ async function sendSyncReport(results) {
       body: JSON.stringify({
         from: 'BoligRetning <onboarding@resend.dev>',
         to: 'kontakt@boligretning.dk',
-        subject: `Tracking Sync: ${results.fulfilled} ordrer opdateret${results.errors.some(e => e.CRITICAL) ? ' ⚠️ KRITISK FEJL' : ''}`,
+        subject: `Tracking Sync: ${results.fulfilled + results.partialFulfilled} ordrer opdateret${results.errors.some(e => e.CRITICAL) ? ' ⚠️ KRITISK FEJL' : ''}`,
         html: emailHtml
       })
     });
@@ -555,7 +612,7 @@ async function sendSyncReport(results) {
   }
 }
 
-// Send fejl email - OPDATERET MED DROPXL
+// Send fejl email
 async function sendErrorEmail(subject, error) {
   try {
     const response = await fetch('https://api.resend.com/emails', {
