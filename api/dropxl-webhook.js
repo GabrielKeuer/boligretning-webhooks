@@ -1,5 +1,9 @@
 import crypto from 'crypto';
 
+// Tilladt vendor liste - DropXL håndterer disse brands
+// Inkluderer både 'vidaXL' (som det står i Shopify) og case variations
+const DROPXL_VENDORS = ['vidaXL', 'VidaXL', 'vidaxl', 'Bestway', 'bestway', 'Keter', 'keter'];
+
 export const config = {
   api: {
     bodyParser: false,
@@ -35,7 +39,7 @@ async function sendErrorEmail(order, error) {
       body: JSON.stringify({
         from: 'BoligRetning <onboarding@resend.dev>',
         to: 'kontakt@boligretning.dk',
-        subject: `DropXL Ordre Fejl - ${order.name}`,  // ÆNDRET: VidaXL → DropXL
+        subject: `DropXL Ordre Fejl - ${order.name}`,
         html: `
           <h2>Ordre kunne ikke sendes til DropXL</h2>
           <p><strong>Ordre:</strong> ${order.name}</p>
@@ -57,18 +61,18 @@ async function sendErrorEmail(order, error) {
   }
 }
 
-async function sendToDropXL(order) {  // ÆNDRET: Funktion navn fra sendToVidaXL
+async function sendToDropXL(order, dropxlItems) {  // Nu tager den filtrerede items som parameter
   console.log('📤 Sender til DropXL...');
   
-  // TILFØJET: Fallback telefonnummer - DropXL kræver altid telefon
+  // Fallback telefonnummer - DropXL kræver altid telefon
   const fallbackPhone = order.shipping_address.phone || order.phone || process.env.COMPANY_PHONE || '70701870';
   
-  const dropxlOrder = {  // ÆNDRET: Variabel navn fra vidaxlOrder
+  const dropxlOrder = {
     customer_order_reference: order.name,
     addressbook: {
       country: order.shipping_address.country_code
     },
-    order_products: order.line_items.map(item => ({
+    order_products: dropxlItems.map(item => ({  // Bruger filtrerede items
       product_code: item.sku,
       quantity: item.quantity,
       addressbook: {
@@ -80,18 +84,18 @@ async function sendToDropXL(order) {  // ÆNDRET: Funktion navn fra sendToVidaXL
         postal_code: order.shipping_address.zip,
         country: order.shipping_address.country_code,
         email: order.email,
-        phone: fallbackPhone,  // ÆNDRET: Nu bruger fallback telefon
+        phone: fallbackPhone,
         comments: order.note || ''
       }
     }))
   };
   
-  // ÆNDRET: Ny DropXL endpoint og authentication
-  const response = await fetch('https://b2b.dropxl.com/api_customer/orders', {  // ÆNDRET: URL
+  // Ny DropXL endpoint og authentication
+  const response = await fetch('https://b2b.dropxl.com/api_customer/orders', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Basic ' + Buffer.from(`${process.env.DROPXL_EMAIL}:${process.env.DROPXL_API_TOKEN}`).toString('base64')  // ÆNDRET: Environment variables
+      'Authorization': 'Basic ' + Buffer.from(`${process.env.DROPXL_EMAIL}:${process.env.DROPXL_API_TOKEN}`).toString('base64')
     },
     body: JSON.stringify(dropxlOrder)
   });
@@ -99,7 +103,7 @@ async function sendToDropXL(order) {  // ÆNDRET: Funktion navn fra sendToVidaXL
   const result = await response.json();
   
   if (!response.ok) {
-    throw new Error(`DropXL API error: ${JSON.stringify(result)}`);  // ÆNDRET: Error message
+    throw new Error(`DropXL API error: ${JSON.stringify(result)}`);
   }
   
   return result;
@@ -140,44 +144,90 @@ export default async function handler(req, res) {
         return;
       }
       
-      console.log('🔄 RETRY fundet i note - sender til DropXL!');  // ÆNDRET: VidaXL → DropXL
+      console.log('🔄 RETRY fundet i note - sender til DropXL!');
     }
-
     
-    console.log('📦 Ordre detaljer:', {
+    // VENDOR FILTERING: Filtrer kun DropXL produkter
+    const dropxlItems = order.line_items.filter(item => {
+      // Skip hvis ingen vendor
+      if (!item.vendor) {
+        console.log(`⏭️ Springer over produkt uden vendor: ${item.sku} - ${item.name}`);
+        return false;
+      }
+      
+      // Check om vendor er i DropXL listen
+      if (!DROPXL_VENDORS.includes(item.vendor)) {
+        console.log(`⏭️ Springer over non-DropXL produkt: ${item.sku} - ${item.name} (Vendor: ${item.vendor})`);
+        return false;
+      }
+      
+      // Skip hvis ingen SKU
+      if (!item.sku) {
+        console.log(`⏭️ Springer over DropXL produkt uden SKU: ${item.name}`);
+        return false;
+      }
+      
+      return true;
+    });
+    
+    // Hvis ingen DropXL produkter, skip helt - DETTE ER IKKE EN FEJL!
+    if (dropxlItems.length === 0) {
+      console.log(`📝 Ingen DropXL produkter i ordre ${order.name} - det er helt OK!`);
+      console.log(`   Ordre indeholder kun produkter fra andre leverandører`);
+      return res.status(200).json({ 
+        success: true,
+        message: 'No DropXL products in order - other vendors only',
+        products_total: order.line_items.length,
+        products_dropxl: 0,
+        skipped_reason: 'non_dropxl_vendors'
+      });
+    }
+    
+    console.log(`📦 Ordre detaljer:`, {
       name: order.name,
       email: order.email,
-      products: order.line_items?.map(item => ({
+      total_products: order.line_items.length,
+      dropxl_products: dropxlItems.length,
+      skipped_products: order.line_items.length - dropxlItems.length,
+      vendors_included: [...new Set(dropxlItems.map(item => item.vendor))],
+      products: dropxlItems.map(item => ({
         sku: item.sku,
         qty: item.quantity,
-        name: item.name
+        name: item.name,
+        vendor: item.vendor
       }))
     });
     
-    // Send til DropXL
+    // Send til DropXL (kun DropXL produkter)
     try {
-      const dropxlResult = await sendToDropXL(order);  // ÆNDRET: Funktion kald og variabel navn
-      console.log('✅ Ordre sendt til DropXL!', dropxlResult.order?.id);  // ÆNDRET: Log message
+      const dropxlResult = await sendToDropXL(order, dropxlItems);  // Send filtrerede items
+      console.log(`✅ Ordre sendt til DropXL! ID: ${dropxlResult.order?.id}`);
+      console.log(`📊 ${dropxlItems.length} DropXL produkter sendt, ${order.line_items.length - dropxlItems.length} andre produkter ignoreret`);
       
       // Svar Shopify EFTER DropXL success
       res.status(200).json({ 
         success: true,
-        dropxl_order_id: dropxlResult.order?.id  // ÆNDRET: Key navn
+        dropxl_order_id: dropxlResult.order?.id,
+        products_sent: dropxlItems.length,
+        products_skipped: order.line_items.length - dropxlItems.length,
+        vendors_included: [...new Set(dropxlItems.map(item => item.vendor))]
       });
       
-    } catch (dropxlError) {  // ÆNDRET: Variabel navn
-      console.error('❌ DropXL fejl:', dropxlError.message);  // ÆNDRET: Log message
+    } catch (dropxlError) {
+      console.error('❌ DropXL fejl:', dropxlError.message);
       
       // Send error email
       await sendErrorEmail(order, {
         error: dropxlError.message,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        products_attempted: dropxlItems.length,
+        products_skipped: order.line_items.length - dropxlItems.length
       });
       
       // Svar success til Shopify alligevel
       res.status(200).json({ 
         success: false,
-        error: 'DropXL API fejlede - email sendt'  // ÆNDRET: Error message
+        error: 'DropXL API fejlede - email sendt'
       });
     }
     
