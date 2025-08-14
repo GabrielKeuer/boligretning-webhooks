@@ -2,7 +2,7 @@
 // Manuel endpoint til at gensende ordre til DropXL (VidaXL, Bestway, Keter)
 
 // Tilladt vendor liste - DropXL håndterer disse brands
-const DROPXL_VENDORS = ['VidaXL', 'vidaxl', 'vidaXL', 'Bestway', 'bestway', 'Keter', 'keter'];
+const DROPXL_VENDORS = ['VidaXL', 'vidaxl', 'Bestway', 'bestway', 'Keter', 'keter'];
 
 export default async function handler(req, res) {
   // Check auth
@@ -96,8 +96,18 @@ export default async function handler(req, res) {
     if (activeLineItems.length === 0) {
       // Tjek om det er fordi der ingen DropXL produkter var
       if (dropxlProducts.length === 0) {
-        throw new Error('Ingen DropXL produkter i denne ordre (kun VidaXL, Bestway og Keter sendes til DropXL)');
+        // Dette er IKKE en fejl - bare en ordre uden DropXL produkter
+        console.log('📝 Ordre indeholder kun produkter fra andre leverandører - det er OK!');
+        return res.json({
+          success: true,
+          message: 'Ingen DropXL produkter i ordre - kun andre leverandører',
+          shopify_order: order.name,
+          products_total: order.line_items.length,
+          products_dropxl: 0,
+          skipped_reason: 'non_dropxl_vendors'
+        });
       } else {
+        // Dette ER en fejl - der var DropXL produkter men de kunne ikke sendes
         throw new Error('Ingen aktive DropXL produkter at sende (alle er refunderet eller mangler SKU)');
       }
     }
