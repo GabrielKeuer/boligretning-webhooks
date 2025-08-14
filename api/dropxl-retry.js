@@ -2,7 +2,7 @@
 // Manuel endpoint til at gensende ordre til DropXL (VidaXL, Bestway, Keter)
 
 // Tilladt vendor liste - DropXL håndterer disse brands
-const DROPXL_VENDORS = ['VidaXL', 'vidaxl', 'Bestway', 'bestway', 'Keter', 'keter'];
+const DROPXL_VENDORS = ['VidaXL', 'vidaxl', 'vidaXL', 'Bestway', 'bestway', 'Keter', 'keter'];
 
 export default async function handler(req, res) {
   // Check auth
