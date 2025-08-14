@@ -2,12 +2,19 @@
   "functions": {
     "api/vidaxl-sync-tracking.js": {
       "maxDuration": 60
+    },
+    "api/dropxl-sync-tracking.js": {
+      "maxDuration": 60
     }
   },
   "crons": [
     {
       "path": "/api/vidaxl-sync-tracking",
       "schedule": "0 8,12,16 * * *"
+    },
+    {
+      "path": "/api/dropxl-sync-tracking",
+      "schedule": "30 8,12,16 * * *"
     }
   ]
 }
