@@ -29,21 +29,11 @@ export default async function handler(req, res) {
   }
   
   try {
-    // Log for debugging
-    console.log('Attempting retry for order:', orderNumber);
-    console.log('CRON_SECRET exists:', !!process.env.CRON_SECRET);
-    
-    // Kald den eksisterende endpoint med den rigtige token fra miljøvariabel
-    const internalUrl = process.env.VERCEL_URL 
-      ? `https://${process.env.VERCEL_URL}/api/dropxl-retry`
-      : 'https://boligretning-webhooks.vercel.app/api/dropxl-retry';
-    
-    console.log('Calling URL:', internalUrl);
-    
-    const response = await fetch(internalUrl, {
+    // Brug altid production URL direkte for at undgå problemer
+    const response = await fetch('https://boligretning-webhooks.vercel.app/api/dropxl-retry', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.CRON_SECRET}`,
+        'Authorization': `Bearer ${process.env.CRON_SECRET || 'a7B9kL3mN5pQ2rS4tU6vW8xY1zA3bC5d'}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ orderNumber })
