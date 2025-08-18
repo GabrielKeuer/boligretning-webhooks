@@ -416,7 +416,15 @@
                     let message = `✅ <strong>${data.shopify_order}</strong> sendt til DropXL!`;
                     if (data.dropxl_order_id) {
                         message += `<br>📋 DropXL ID: ${data.dropxl_order_id}`;
+                    } else {
+                        message += `<br>⚠️ Ingen DropXL ID modtaget`;
                     }
+                    if (data.products_sent === 0) {
+                        message += `<br>⚠️ <strong>0 produkter sendt!</strong>`;
+                    }
+                    
+                    // Vis debug info
+                    console.log('Full response:', data);
                     
                     showResult(message, 'success');
                     
