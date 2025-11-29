@@ -120,7 +120,7 @@ export default async function handler(req, res) {
     const fallbackPhone = order.shipping_address.phone || order.phone || process.env.COMPANY_PHONE || '70701870';
     
     const dropxlOrder = {
-      customer_order_reference: `${order.name}-retry`,
+      customer_order_reference: `${order.id}`,
       addressbook: {
         country: order.shipping_address.country_code
       },
