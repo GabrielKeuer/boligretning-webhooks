@@ -6,9 +6,19 @@
 
 const KLAVIYO_KEY = process.env.KLAVIYO_PRIVATE_KEY;
 const NOTIFY_EMAIL = process.env.WITHDRAWAL_NOTIFY_EMAIL;
-const ALLOWED = [
-  process.env.WITHDRAWAL_ALLOWED_ORIGIN || "https://boligretning.dk",
+const DEFAULT_ORIGINS = [
+  "https://boligretning.dk",
   "https://www.boligretning.dk",
+  "https://b7916a-38.myshopify.com",
+];
+const ALLOWED = [
+  ...new Set([
+    ...DEFAULT_ORIGINS,
+    ...(process.env.WITHDRAWAL_ALLOWED_ORIGIN || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  ]),
 ];
 
 function setCors(res, origin) {
